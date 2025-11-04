@@ -1,133 +1,101 @@
+// dbus/events.go
 package dbus
 
 import (
-	"netpala/common"
-	"netpala/network"
+	"bluepala/bluetooth" // Our new bluetooth package
+	"bluepala/common"    // Our new types
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/godbus/dbus/v5"
 )
 
-// This command waits for a single signal from the provided channel
-// and translates it into a BubbleTea message.
+// WaitForDBusSignal is a tea.Cmd that blocks and waits for a single D-Bus signal.
+// It translates the signal into a specific, granular tea.Msg for our Update loop.
+// This is far more efficient than re-scanning all devices on every signal.
 func WaitForDBusSignal(conn *dbus.Conn, sig chan *dbus.Signal) tea.Cmd {
 	return func() tea.Msg {
-		s := <-sig // Block for next signal
+		s := <-sig // Block until a signal is received
 
 		switch s.Name {
-		case "org.freedesktop.DBus.Properties.PropertiesChanged":
-			// Body[0] is the interface name whose properties changed.
-			if len(s.Body) > 0 {
-				if iface, ok := s.Body[0].(string); ok {
-					// --- THIS IS THE FIX ---
-					// Check if properties changed on the main NM object OR a Device object.
-					// This ensures we catch WirelessEnabled changes AND device state/scanning changes.
-					if iface == network.NMDest || iface == network.DevIF || iface == network.WifiIF {
-						// Refresh devices and potentially VPNs (as device state affects VPN)
-						return tea.BatchMsg{
-							func() tea.Msg { return common.DeviceUpdateMsg(network.GetDevicesData(conn)) },
-							func() tea.Msg { return common.VpnUpdateMsg(network.GetVpnData(conn)) }, // VPN status might depend on device state
-						}
-					}
-					// --- END FIX ---
+		// --- ObjectManager Signals ---
+		// These signals tell us when devices are added or removed.
+
+		case bluetooth.ObjectManagerIF + ".InterfacesAdded":
+			// A new device has appeared (e.g., from a scan)
+			if len(s.Body) < 2 {
+				break // Invalid signal
+			}
+			path, ok := s.Body[0].(dbus.ObjectPath)
+			if !ok {
+				break
+			}
+			// The interfaces map is the exact same format as GetManagedObjects
+			interfaces, ok := s.Body[1].(map[string]map[string]dbus.Variant)
+			if !ok {
+				break
+			}
+			// Send a message with just the *new* device's data
+			return common.DeviceAddedMsg{
+				Path:       path,
+				Interfaces: interfaces,
+			}
+
+		case bluetooth.ObjectManagerIF + ".InterfacesRemoved":
+			// A device has been removed (e.g., "forgotten" or disconnected)
+			if len(s.Body) < 1 {
+				break // Invalid signal
+			}
+			path, ok := s.Body[0].(dbus.ObjectPath)
+			if !ok {
+				break
+			}
+			// Send a message telling the model to *remove* this one device
+			return common.DeviceRemovedMsg{Path: path}
+
+		// --- PropertiesChanged Signal ---
+		// This signal tells us when a property on an *existing* device changes.
+
+		case bluetooth.PropsIF + ".PropertiesChanged":
+			// e.g., "Connected" changed from false to true
+			if len(s.Body) < 2 {
+				break // Invalid signal
+			}
+			iface, ok := s.Body[0].(string)
+			if !ok {
+				break
+			}
+			changes, ok := s.Body[1].(map[string]dbus.Variant)
+			if !ok || len(changes) == 0 {
+				break // No actual changes
+			}
+
+			// We only care about changes to Adapters, Devices, or Batteries
+			if iface == bluetooth.AdapterIF || iface == bluetooth.DeviceIF || iface == bluetooth.BatteryIF {
+				// Send a message with *only* the properties that changed
+				return common.DevicePropertiesChangedMsg{
+					Path:    s.Path, // The signal is emitted on the object that changed
+					Changes: changes,
 				}
 			}
-			// If it wasn't a property change we care about, listen again.
-
-		case "org.freedesktop.NetworkManager.DeviceAdded",
-			"org.freedesktop.NetworkManager.DeviceRemoved",
-			"org.freedesktop.NetworkManager.Device.StateChanged":
-			// Device state changes definitely affect connectivity. Refresh relevant lists.
-			return tea.BatchMsg{
-				func() tea.Msg { return common.DeviceUpdateMsg(network.GetDevicesData(conn)) },
-				func() tea.Msg { return common.KnownNetworksUpdateMsg(network.GetKnownNetworks(conn)) },
-				func() tea.Msg { return common.VpnUpdateMsg(network.GetVpnData(conn)) }, // VPN status might depend on device state
-			}
-
-		case "org.freedesktop.NetworkManager.Settings.NewConnection",
-			"org.freedesktop.NetworkManager.Settings.ConnectionRemoved":
-			// Adding/Removing connections affects Known Networks and VPN lists.
-			return tea.BatchMsg{
-				func() tea.Msg { return common.KnownNetworksUpdateMsg(network.GetKnownNetworks(conn)) },
-				func() tea.Msg { return common.VpnUpdateMsg(network.GetVpnData(conn)) },
-			}
-
-		case "org.freedesktop.NetworkManager.Device.Wireless.AccessPointAdded",
-			"org.freedesktop.NetworkManager.Device.Wireless.AccessPointRemoved":
-			// Signals that scan results *might* have changed. Trigger debounce.
-			return common.ScannedNetworksUpdateMsg(nil)
 		}
 
-		// If we fall through, it was a signal we don't handle. Listen again.
+		// If we didn't handle the signal, listen for the next one.
 		return WaitForDBusSignal(conn, sig)()
 	}
 }
 
-// Command to periodically trigger a full data refresh.
+// RefreshAllDataCmd is a tea.Cmd that triggers a full, fresh state load.
+// This is the equivalent of your old RefreshAllData.
+func RefreshAllDataCmd(conn *dbus.Conn) tea.Cmd {
+	return GetInitialStateCmd(conn) // GetInitialStateCmd already does this
+}
+
+// RefreshTicker returns a command that sends a PeriodicRefreshMsg
+// on a 15-second interval, just like your old project.
 func RefreshTicker() tea.Cmd {
 	return tea.Tick(15*time.Second, func(t time.Time) tea.Msg {
+		// In our main Update loop, this msg will trigger RefreshAllDataCmd
 		return common.PeriodicRefreshMsg{}
 	})
-}
-
-func RequestScan(conn *dbus.Conn) tea.Cmd {
-	return func() tea.Msg {
-		nm := conn.Object(network.NMDest, dbus.ObjectPath(network.NMPath))
-		var devPaths []dbus.ObjectPath
-		// Perform the D-Bus call, return error if it fails
-		if err := nm.Call(network.NMDest+".GetDevices", 0).Store(&devPaths); err != nil {
-			return common.ErrMsg{Err: err}
-		}
-
-		// Trigger scan on WiFi devices
-		scanRequested := false
-		for _, devPath := range devPaths {
-			devObj := conn.Object(network.NMDest, devPath)
-			devProps := network.GetProps(devObj, network.DevIF) // Use GetProps from network package
-			if devProps != nil {
-				if deviceType, ok := devProps["DeviceType"].Value().(uint32); ok && deviceType == 2 {
-					_ = devObj.Call(network.WifiIF+".RequestScan", 0, map[string]dbus.Variant{})
-					scanRequested = true // Mark that we asked at least one device
-				}
-			}
-		}
-
-		if !scanRequested {
-			// Optional: Inform user if no WiFi device was found to scan
-			// return common.ErrMsg{Err: fmt.Errorf("no wifi device found to scan")}
-		}
-
-		// Success: Scan requested, return nil. The signal listener will handle updates.
-		return nil
-	}
-}
-
-func GetScanResults(conn *dbus.Conn) tea.Cmd {
-	return func() tea.Msg {
-		nm := conn.Object(network.NMDest, dbus.ObjectPath(network.NMPath))
-		var devPaths []dbus.ObjectPath
-		if err := nm.Call(network.NMDest+".GetDevices", 0).Store(&devPaths); err != nil {
-			return common.ErrMsg{Err: err}
-		}
-
-		for _, devPath := range devPaths {
-			devObj := conn.Object(network.NMDest, devPath)
-			devProps := network.GetProps(devObj, network.DevIF)
-			if devProps["DeviceType"].Value().(uint32) == 2 { // WiFi device
-				_ = devObj.Call(network.WifiIF+".RequestScan", 0, map[string]dbus.Variant{})
-			}
-		}
-		
-		return common.ScannedNetworksUpdateMsg(network.GetScannedNetworks(conn))
-	}
-}
-
-func RefreshAllData(conn *dbus.Conn) tea.Cmd {
-	return tea.Batch(
-		GetScanResults(conn),
-		func() tea.Msg { return common.DeviceUpdateMsg(network.GetDevicesData(conn)) },
-		func() tea.Msg { return common.KnownNetworksUpdateMsg(network.GetKnownNetworks(conn)) },
-		func() tea.Msg { return common.VpnUpdateMsg(network.GetVpnData(conn)) },
-	)
 }

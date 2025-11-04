@@ -1,8 +1,6 @@
 package models
 
 import (
-	"netpala/common"
-
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -29,7 +27,8 @@ func (m Confirmation) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch key.String() {
 		case "esc", "ctrl+c", "enter":
-			return m, func() tea.Msg { return common.SubmitConfirmationMsg{ Value: m.Value } }
+			return m, nil
+			// return m, func() tea.Msg { return common.SubmitConfirmationMsg{ Value: m.Value } }
 		case "tab", "right":
 			m.Value = true
 		case "shift+tab", "left":

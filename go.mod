@@ -1,4 +1,4 @@
-module netpala
+module bluepala
 
 go 1.25.1
 
@@ -6,13 +6,13 @@ require (
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/google/uuid v1.6.0
-	github.com/mritd/bubbles v0.0.0-20210825105013-cb7a572fb831
-	github.com/rmhubbert/bubbletea-overlay v0.4.4
 	golang.org/x/term v0.35.0
 )
 
-require github.com/atotto/clipboard v0.1.4 // indirect
+require (
+	github.com/atotto/clipboard v0.1.4 // indirect
+	golang.org/x/exp v0.0.0-20241204233417-43b7b7cde48d // indirect
+)
 
 require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect

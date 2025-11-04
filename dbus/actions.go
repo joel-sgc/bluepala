@@ -1,282 +1,153 @@
+// dbus/actions.go
 package dbus
 
 import (
+	"bluepala/bluetooth"
+	"bluepala/common"
 	"fmt"
-	"strings"
-	"time" // Added time import
-
-	"netpala/common"
-	"netpala/network"
+	"os/exec"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/godbus/dbus/v5"
-	"github.com/google/uuid"
 )
 
-// connectToNetworkCmd tells NetworkManager to activate a connection on a specific device.
-func ConnectToNetworkCmd(conn *dbus.Conn, connectionPath, devicePath dbus.ObjectPath) tea.Cmd {
+// GetInitialStateCmd is a tea.Cmd that fetches the initial BlueZ state.
+// It calls our synchronous GetInitialState function and returns
+// the results as messages for the BubbleTea update loop.
+func GetInitialStateCmd(conn *dbus.Conn) tea.Cmd {
 	return func() tea.Msg {
-		nm := conn.Object(network.NMDest, dbus.ObjectPath(network.NMPath))
-
-		// The D-Bus method call to activate the connection.
-		call := nm.Call(
-			"org.freedesktop.NetworkManager.ActivateConnection",
-			0,
-			connectionPath,
-			devicePath,
-			dbus.ObjectPath("/"),
-		)
-
-		if call.Err != nil {
-			return common.ErrMsg{Err: fmt.Errorf("failed to activate connection: %w", call.Err)}
-		}
-		// Success is handled by signal listener
-		return nil
-	}
-}
-
-// AddAndConnectToNetworkCmd adds a standard network and attempts connection.
-func AddAndConnectToNetworkCmd(conn *dbus.Conn, net common.ScannedNetwork, password string, devicePath dbus.ObjectPath) tea.Cmd {
-	return func() tea.Msg {
-		// 1. Generate UUID
-		newUUID, err := uuid.NewRandom()
+		adapters, devices, err := bluetooth.GetInitialState(conn)
 		if err != nil {
-			return common.ErrMsg{Err: fmt.Errorf("failed to generate uuid: %w", err)}
+			return common.ErrMsg{Err: err}
 		}
 
-		// 2. Build settings map
-		settings := map[string]map[string]dbus.Variant{
-			"connection": {
-				"id":          dbus.MakeVariant(net.SSID),
-				"uuid":        dbus.MakeVariant(newUUID.String()),
-				"type":        dbus.MakeVariant("802-11-wireless"),
-				"autoconnect": dbus.MakeVariant(true),
-			},
-			"802-11-wireless": {
-				"ssid":     dbus.MakeVariant([]byte(net.SSID)),
-				"mode":     dbus.MakeVariant("infrastructure"),
-				"security": dbus.MakeVariant("802-11-wireless-security"),
-			},
-			"ipv4": {"method": dbus.MakeVariant("auto")},
-			"ipv6": {"method": dbus.MakeVariant("auto")},
-		}
-		securitySettings := make(map[string]dbus.Variant)
-		switch net.Security {
-		case "wpa3-sae":
-			securitySettings["key-mgmt"] = dbus.MakeVariant("sae")
-			securitySettings["psk"] = dbus.MakeVariant(password)
-		case "wpa2-psk":
-			securitySettings["key-mgmt"] = dbus.MakeVariant("wpa-psk")
-			securitySettings["psk"] = dbus.MakeVariant(password)
-		default:
-			if net.Security != "open" {
-				securitySettings["key-mgmt"] = dbus.MakeVariant("wpa-psk")
-				securitySettings["psk"] = dbus.MakeVariant(password)
-			}
-		}
-		if len(securitySettings) > 0 {
-			settings["802-11-wireless-security"] = securitySettings
-		}
-
-		// 3. Add the connection via D-Bus
-		settingsObj := conn.Object(network.NMDest, "/org/freedesktop/NetworkManager/Settings")
-		call := settingsObj.Call("org.freedesktop.NetworkManager.Settings.AddConnection", 0, settings)
-		if call.Err != nil {
-			return common.ErrMsg{Err: fmt.Errorf("failed to add connection: %w", call.Err)}
-		}
-
-		// 4. Get the path (optional)
-		var newConnectionPath dbus.ObjectPath
-		err = call.Store(&newConnectionPath) // Store error
-
-		// 5. Create the delayed refresh command
-		refreshCmd := tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
-			return common.RefreshKnownNetworksMsg{}
-		})
-
-		// 6. Create the optimistic update message
-		optimisticMsg := common.OptimisticAddMsg{
-			SSID:     net.SSID,
-			Security: net.Security, // Use the security string from scanned network
-		}
-
-		// 7. Batch commands based on success
-		var batchCmds []tea.Cmd
-		batchCmds = append(batchCmds, func() tea.Msg { return optimisticMsg }) // Send optimistic update first
-		batchCmds = append(batchCmds, refreshCmd)                             // Schedule real refresh
-
-		if err == nil {
-			// If we got the path, attempt connection
-			batchCmds = append(batchCmds, ConnectToNetworkCmd(conn, newConnectionPath, devicePath))
-		} else {
-			// If we didn't get the path, report the error but still refresh
-			batchCmds = append(batchCmds, func() tea.Msg { return common.ErrMsg{Err: fmt.Errorf("added connection but failed to read path: %w", err)} })
-		}
-		return tea.Batch(batchCmds...)
+		// Send both lists back in a batch
+		// We'll update common/types.go to include these messages
+		return tea.Batch(
+			func() tea.Msg { return common.AdapterUpdateMsg(adapters) },
+			func() tea.Msg { return common.DeviceUpdateMsg(devices) },
+			func() tea.Msg { return common.PeriodicRefreshMsg{} },
+		)()
 	}
 }
 
-// AddAndConnectEAPCmd adds a WPA-EAP network and attempts connection.
-func AddAndConnectEAPCmd(conn *dbus.Conn, config map[string]string, devicePath dbus.ObjectPath) tea.Cmd {
+func ToggleAdapterPowerCmd(conn *dbus.Conn, adapterPath string, state bool) error {
+	// First, ensure rfkill doesn't block us
+	rfkillState := "unblock"
+	if state {
+		rfkillState = "block"
+	}
+	
+	cmd := exec.Command("rfkill", rfkillState, "bluetooth")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to %s bluetooth via rfkill: %v", rfkillState, err)
+	}
+
+	// Now set the Bluez power state
+	obj := conn.Object(bluetooth.BluezDest, dbus.ObjectPath(adapterPath))
+	call := obj.Call(
+		"org.freedesktop.DBus.Properties.Set",
+		0,
+		bluetooth.AdapterIF,
+		"Powered", 
+		dbus.MakeVariant(state),
+	)
+	
+	return call.Err
+}
+
+// Non-blocking connection command
+func ConnectToDeviceCmd(conn *dbus.Conn, devices []common.Device, device *common.Device, status bool) tea.Cmd {
 	return func() tea.Msg {
-		// 1. Validate required fields
-		ssid, ok := config["ssid"]
-		if !ok || ssid == "" {
-			return common.ErrMsg{Err: fmt.Errorf("EAP config is missing SSID")}
-		}
-		eapMethod, ok := config["eap"]
-		if !ok || eapMethod == "" {
-			return common.ErrMsg{Err: fmt.Errorf("EAP config is missing EAP method")}
-		}
-		identity, ok := config["identity"]
-		if !ok || identity == "" {
-			return common.ErrMsg{Err: fmt.Errorf("EAP config is missing identity")}
+		path := dbus.ObjectPath(device.Path)
+
+		action := "Disconnect"
+		if status {
+			action = "Connect"
 		}
 
-		// 2. Generate UUID
-		newUUID, err := uuid.NewRandom()
-		if err != nil {
-			return common.ErrMsg{Err: fmt.Errorf("failed to generate UUID for EAP: %w", err)}
-		}
+		obj := conn.Object(bluetooth.BluezDest, dbus.ObjectPath(path))
+		call := obj.Call(fmt.Sprintf("%s.%s", bluetooth.DeviceIF, action), 0)
 
-		// 3. Build EAP settings
-		eapSettings := map[string]dbus.Variant{
-			"eap":      dbus.MakeVariant([]string{strings.ToLower(eapMethod)}),
-			"identity": dbus.MakeVariant(identity),
-			"password": dbus.MakeVariant(config["password"]),
-		}
-		if phase2, ok := config["phase2-auth"]; ok && phase2 != "" && phase2 != "NONE" {
-			eapSettings["phase2-auth"] = dbus.MakeVariant(strings.ToLower(phase2))
-		}
-		if certPath, ok := config["ca_cert"]; ok && certPath != "" {
-			eapSettings["ca-cert"] = dbus.MakeVariant("file://" + certPath)
-		}
-
-		// 4. Build complete settings map
-		settings := map[string]map[string]dbus.Variant{
-			"connection": {
-				"id":          dbus.MakeVariant(ssid),
-				"uuid":        dbus.MakeVariant(newUUID.String()),
-				"type":        dbus.MakeVariant("802-11-wireless"),
-				"autoconnect": dbus.MakeVariant(true),
-			},
-			"802-11-wireless": {
-				"ssid":     dbus.MakeVariant([]byte(ssid)),
-				"mode":     dbus.MakeVariant("infrastructure"),
-				"security": dbus.MakeVariant("802-11-wireless-security"),
-			},
-			"802-11-wireless-security": {
-				"key-mgmt": dbus.MakeVariant("wpa-eap"),
-			},
-			"802-1x": eapSettings,
-			"ipv4":   {"method": dbus.MakeVariant("auto")},
-			"ipv6":   {"method": dbus.MakeVariant("auto")},
-		}
-
-		// 5. Add the connection via D-Bus
-		settingsObj := conn.Object(network.NMDest, "/org/freedesktop/NetworkManager/Settings")
-		call := settingsObj.Call("org.freedesktop.NetworkManager.Settings.AddConnection", 0, settings)
 		if call.Err != nil {
-			return common.ErrMsg{Err: fmt.Errorf("failed to add EAP connection: %w", call.Err)}
+			return common.ErrMsg{Err: call.Err}
 		}
 
-		// 6. Get the path (optional)
-		var newConnectionPath dbus.ObjectPath
-		err = call.Store(&newConnectionPath) // Store error
-
-		// 7. Create the delayed refresh command
-		refreshCmd := tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
-			return common.RefreshKnownNetworksMsg{}
-		})
-
-		// 8. Create the optimistic update message
-		optimisticMsg := common.OptimisticAddMsg{
-			SSID:     ssid,
-			Security: "wpa2-eap", // Generally correct assumption for EAP
-		}
-
-		// 9. Batch commands based on success
-		var batchCmds []tea.Cmd
-		batchCmds = append(batchCmds, func() tea.Msg { return optimisticMsg }) // Send optimistic update first
-		batchCmds = append(batchCmds, refreshCmd)                             // Schedule real refresh
-
-		if err == nil {
-			// If we got the path, attempt connection
-			batchCmds = append(batchCmds, ConnectToNetworkCmd(conn, newConnectionPath, devicePath))
-		} else {
-			// If we didn't get the path, report the error but still refresh
-			batchCmds = append(batchCmds, func() tea.Msg { return common.ErrMsg{Err: fmt.Errorf("added EAP connection but failed to read path: %w", err)} })
-		}
-		return tea.Batch(batchCmds...)
+		return common.DeviceUpdateMsg(devices)
 	}
 }
 
-// ToggleVpnCmd activates or deactivates a VPN connection.
-func ToggleVpnCmd(conn *dbus.Conn, vpnPath dbus.ObjectPath, activePath dbus.ObjectPath, active bool) tea.Cmd {
+func ForgetDeviceCmd(conn *dbus.Conn, adapterPath dbus.ObjectPath, devicePath dbus.ObjectPath) tea.Cmd {
 	return func() tea.Msg {
-		nm := conn.Object(network.NMDest, dbus.ObjectPath(network.NMPath))
-		var call *dbus.Call
-		action := "activate" // For error message
+		// 1. Get the adapter object (e.g., /org/bluez/hci0)
+		adapterObj := conn.Object(bluetooth.BluezDest, adapterPath)
 
-		if active {
-			// Deactivate using the *active* connection path
-			action = "deactivate"
-			if activePath == "/" { // Sanity check
-				return common.ErrMsg{Err: fmt.Errorf("cannot deactivate VPN: no active connection path found")}
-			}
-			activeConnObj := conn.Object(network.NMDest, activePath)
-			// Note: Deactivate is on the Active connection interface, not the main NM interface
-			call = activeConnObj.Call("org.freedesktop.NetworkManager.Connection.Active.Deactivate", 0)
-		} else {
-			// Activate using the *saved* connection path
-			call = nm.Call(
-				"org.freedesktop.NetworkManager.ActivateConnection",
-				0,
-				vpnPath,                // Saved connection path
-				dbus.ObjectPath("/"),   // device path is not needed for VPN
-				dbus.ObjectPath("/"),   // specific object path
-			)
-		}
-
+		// 2. Call the RemoveDevice method on the adapter
+		call := adapterObj.Call(
+			bluetooth.AdapterIF+".RemoveDevice", // Method name
+			0,                                 // Flags
+			devicePath,                        // Argument 1: path of device to remove
+		)
+		
 		if call.Err != nil {
-			return common.ErrMsg{Err: fmt.Errorf("failed to %s vpn connection '%s': %w", action, vpnPath, call.Err)}
+			return common.ErrMsg{Err: fmt.Errorf("failed to remove device %s: %w", devicePath, call.Err)}
 		}
-		// Success handled by signal listener
+
+		// 3. Success!
+		// We return 'nil' because BlueZ will now emit an
+		// 'InterfacesRemoved' signal. Our dbus/events.go
+		// listener will catch this and send a
+		// 'common.DeviceRemovedMsg' to our Update loop,
+		// which will then remove the device from the list.
 		return nil
 	}
 }
 
-// ToggleWifiCmd sets the master Wi-Fi radio state.
-func ToggleWifiCmd(conn *dbus.Conn, enable bool) tea.Cmd {
+func PairDeviceCmd(conn *dbus.Conn, devicePath dbus.ObjectPath) tea.Cmd {
 	return func() tea.Msg {
-		nm := conn.Object(network.NMDest, dbus.ObjectPath(network.NMPath))
-		call := nm.Call(
-			"org.freedesktop.DBus.Properties.Set",
-			0,
-			network.NMDest,
-			"WirelessEnabled",
-			dbus.MakeVariant(enable),
+		// 1. Get the device object
+		deviceObj := conn.Object(bluetooth.BluezDest, devicePath)
+
+		// 2. Call the Pair method
+		call := deviceObj.Call(
+			bluetooth.DeviceIF+".Pair", // Method name
+			0,                          // Flags
 		)
+		
 		if call.Err != nil {
-			return common.ErrMsg{Err: fmt.Errorf("failed to set WirelessEnabled property: %w", call.Err)}
+			// This will often return 'AuthenticationFailed' or 'AuthenticationCanceled'
+			// if no Agent is available to handle a PIN request.
+			return common.ErrMsg{Err: fmt.Errorf("failed to pair with %s: %w", devicePath, call.Err)}
 		}
-		// Success handled by signal listener
+
+		// 3. Success!
+		// We return 'nil'. The pairing process is now active.
+		// Our 'WaitForDBusSignal' listener will eventually
+		// receive a 'PropertiesChanged' signal for 'Paired = true'
+		// if the pairing succeeds.
 		return nil
 	}
 }
 
-// DeleteConnectionCmd tells NetworkManager to delete a saved connection profile.
-func DeleteConnectionCmd(conn *dbus.Conn, connectionPath dbus.ObjectPath) tea.Cmd {
+func StartScanning(conn *dbus.Conn, adapterPath *dbus.ObjectPath) tea.Cmd {
 	return func() tea.Msg {
-		connObj := conn.Object(network.NMDest, connectionPath)
-		call := connObj.Call(
-			"org.freedesktop.NetworkManager.Settings.Connection.Delete",
-			0,
-		)
+		obj := conn.Object(bluetooth.BluezDest, *adapterPath)
+		call := obj.Call(bluetooth.AdapterIF+".StartDiscovery", 0)
 		if call.Err != nil {
-			return common.ErrMsg{Err: fmt.Errorf("failed to delete connection %s: %w", connectionPath, call.Err)}
+			return common.ErrMsg{Err: fmt.Errorf("failed to start discovery: %v", call.Err)}
 		}
-		// Success handled by signal listener
+		return nil
+	}
+}
+
+// StopScanning stops Bluetooth device discovery
+func StopScanning(conn *dbus.Conn, adapterPath *dbus.ObjectPath) tea.Cmd {
+	return func() tea.Msg {
+		obj := conn.Object(bluetooth.BluezDest, *adapterPath)
+		call := obj.Call(bluetooth.AdapterIF+".StopDiscovery", 0)
+		if call.Err != nil {
+			return common.ErrMsg{Err: fmt.Errorf("failed to stop discovery: %v", call.Err)}
+		}
 		return nil
 	}
 }

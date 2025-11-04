@@ -1,20 +1,18 @@
-# Netpala (Impala Go Edition)
+# bluepala (Impala Go Edition)
 
 A lightweight (hopefully), terminal-friendly **NetworkManager + wpa_supplicant** wrapper written in **Go**.
 It’s a clone of **Impala** because Impala's UI made a white tear roll down my leg.
 
 ---
 
-## 🚀 Features (so far)
+## 🚀 Timeline
 
-- ✅ Lists available **network devices**
-- ✅ Displays **known** and **scanned** networks
-- ✅ Displays **vpn** connections
-- ✅ Adding and connecting to password based networks (wpa-psk/sae)
-- ✅ Adding and connecting to wpa-enterprise based networks (wpa-eap)
-- ✅ Force network scan with keybind
-- ✅ Enabling / Disabling network device
-- ⚙️ Uses **DBus** to talk directly to NetworkManager and wpa_supplicant
+- ✅ Lists available **bluetooth adapters**
+- ✅ Displays **paired** and **scanned** devices
+- ❌ Pairing and unpairing devices
+- ❌ Connecting and disconnecting to and from devices
+- ❌ Showing devices details (Name, MAC address, Path, RSSID, Battery, Type)
+- ❌ Handle LE and regular devices
 
 ---
 
@@ -40,17 +38,17 @@ If that sets you off, feel free to fork it, rewrite it, etc... Do whatever, idc.
 \# Clone and build
 
 \```bash
-git clone https://github.com/joel-sgc/netpala.git
-cd netpala
+git clone https://github.com/joel-sgc/bluepala.git
+cd bluepala
 go build
-./netpala
+./bluepala
 \```
 
 Then, edit your omarchy-launch-wifi script to:
 
 ```bash
-#!/bin/bash 
-exec setsid uwsm app -- "$TERMINAL" --class=Impala -e ~/netpala/netpala "$@"
+#!/bin/bash
+exec setsid uwsm app -- "$TERMINAL" --class=Impala -e ~/bluepala/bluepala "$@"
 ```
 
 You’ll need:

@@ -1,7 +1,7 @@
 package models
 
 import (
-	"netpala/common"
+	"bluepala/common"
 	"regexp"
 	"strings"
 
