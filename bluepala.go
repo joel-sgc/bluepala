@@ -8,6 +8,7 @@ import (
 	"bluepala/models"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -55,7 +56,7 @@ func bluepalaModel() *BluepalaData {
 		DevicesTable:	&models.TableData{
 			Conn: conn, 
 			Title: "Devices",
-			Height: 8,
+			Height: 11,
 			PairedDevices:   make([]common.Device, 0),
 		},
 		DetailsTable:	&models.TableData{
@@ -83,8 +84,6 @@ func (m *BluepalaData) Init() tea.Cmd {
 func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
-	// Forward to submodel (pointer-based)
-	
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
@@ -99,11 +98,38 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := dbus.GetInitialStateCmd(m.Conn)
 		cmds = append(cmds, cmd)
 
+	case common.AdapterPropertiesChangedMsg:
+		for i := range m.Adapters {
+			adapter := &m.Adapters[i]
+			if adapter.Path == msg.Path {
+				if discovering, ok := msg.Changes["Discovering"]; ok {
+					adapter.Scanning, _ = discovering.Value().(bool)
+				}
+			}
+		}
+		cmds = append(cmds, dbus.WaitForDBusSignal(m.Conn, m.DBusSignals))
+
 	case common.DevicePropertiesChangedMsg:
-		updateDevice := func(devices []common.Device) {
+		var newlyPairedDevice *common.Device
+		var newlyUnpairedDevice *common.Device
+
+		updateDevice := func(devices []common.Device, isPairedList bool) {
 			for i := range devices {
 				device := &devices[i]
 				if device.Path == msg.Path {
+					// Check for pairing status change
+					if paired, ok := msg.Changes["Paired"]; ok {
+						newPairedStatus := paired.Value().(bool)
+						if newPairedStatus != device.Paired {
+							device.Paired = newPairedStatus
+							if newPairedStatus && !isPairedList {
+								newlyPairedDevice = device
+							} else if !newPairedStatus && isPairedList {
+								newlyUnpairedDevice = device
+							}
+						}
+					}
+
 					if nameVariant, ok := msg.Changes["Name"]; ok {
 						device.Name = nameVariant.Value().(string)
 					}
@@ -135,56 +161,67 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		updateDevice(m.PairedDevices)
-		updateDevice(m.UnpairedDevices)
+		updateDevice(m.PairedDevices, true)
+		updateDevice(m.UnpairedDevices, false)
+
+		// Move device if pairing status changed
+		if newlyPairedDevice != nil {
+			m.UnpairedDevices = removeDeviceByPath(m.UnpairedDevices, newlyPairedDevice.Path)
+			m.PairedDevices = append(m.PairedDevices, *newlyPairedDevice)
+		}
+		if newlyUnpairedDevice != nil {
+			m.PairedDevices = removeDeviceByPath(m.PairedDevices, newlyUnpairedDevice.Path)
+			m.UnpairedDevices = append(m.UnpairedDevices, *newlyUnpairedDevice)
+		}
+
 		cmds = append(cmds, dbus.WaitForDBusSignal(m.Conn, m.DBusSignals))
 
 	case common.AdapterUpdateMsg:
 		m.Adapters = msg
-		_, cmd := m.AdapterTable.Update(msg)
-		cmds = append(cmds, cmd)
+		// The table doesn't need to process this, just have the data for viewing
+		m.AdapterTable.Adapters = m.Adapters
 
 	case common.DeviceAddedMsg:
-		// 1. Check if the new object is a Device.
-    // (The signal could be for a GATT service, which we ignore)
-    deviceProps, isDevice := msg.Interfaces[bluetooth.DeviceIF]
-    if !isDevice {
-			return m, nil // Not a device, ignore it.
-    }
+		// 1. Check if the new object is a usable Device.
+		if !bluetooth.IsUsableDevice(msg.Interfaces) {
+			return m, dbus.WaitForDBusSignal(m.Conn, m.DBusSignals)
+		}
+		deviceProps := msg.Interfaces[bluetooth.DeviceIF]
 
-    // 2. Check if we already have this device (just in case)
-		allDevices := append(m.PairedDevices, m.UnpairedDevices...)
-    for _, dev := range allDevices {
-			if dev.Path == msg.Path {
-				return m, nil // Already in our list.
+		// 2. Parse the device from the message.
+		batteryProps := msg.Interfaces[bluetooth.BatteryIF]
+		newDevice := bluetooth.ParseDevice(msg.Path, deviceProps, batteryProps)
+
+		// 3. Check if the device exists to update it, otherwise add it.
+		found := false
+		// Check paired devices
+		for i, dev := range m.PairedDevices {
+			if dev.Path == newDevice.Path {
+				m.PairedDevices[i] = newDevice // Update existing device
+				found = true
+				break
 			}
-    }
-
-    // 3. It's a new device! Parse it.
-    // Check for battery info (it might be nil)
-    batteryProps := msg.Interfaces[bluetooth.BatteryIF]
-
-    // Use our new public parser function:
-    newDevice := bluetooth.ParseDevice(msg.Path, deviceProps, batteryProps)
-
-    // 4. Add the new device to our main list
-		if newDevice.Paired {
-			m.PairedDevices = append(m.PairedDevices, newDevice)
-
-			if len(m.PairedDevices) > 0 {
-				m.DetailsTable.SelectedPaired = &m.PairedDevices[0]
-			} else {
-				m.DetailsTable.SelectedPaired = &common.BlankDevice
+		}
+		// Check unpaired devices if not found yet
+		if !found {
+			for i, dev := range m.UnpairedDevices {
+				if dev.Path == newDevice.Path {
+					m.UnpairedDevices[i] = newDevice // Update existing device
+					found = true
+					break
+				}
 			}
-
-			m.DevicesTable.PairedDevices = m.PairedDevices
-		} else {
-			m.UnpairedDevices = append(m.UnpairedDevices, newDevice)
-			m.ScannedTable.ScannedDevices = m.UnpairedDevices
 		}
 
-		_, cmd := m.DevicesTable.Update(msg); cmds = append(cmds, cmd)
-		_, cmd = m.ScannedTable.Update(msg); cmds = append(cmds, cmd)
+		// 4. If not found anywhere, it's a new device. Add it to the correct list.
+		if !found {
+			if newDevice.Paired {
+				m.PairedDevices = append(m.PairedDevices, newDevice)
+			} else {
+				m.UnpairedDevices = append(m.UnpairedDevices, newDevice)
+			}
+		}
+
 		cmds = append(cmds, dbus.WaitForDBusSignal(m.Conn, m.DBusSignals))
 
 	case common.DeviceRemovedMsg:
@@ -199,47 +236,59 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.PairedDevices = removeDevice(m.PairedDevices)
 		m.UnpairedDevices = removeDevice(m.UnpairedDevices)
 
-		_, cmd := m.DevicesTable.Update(msg); cmds = append(cmds, cmd)
-		_, cmd = m.ScannedTable.Update(msg); cmds = append(cmds, cmd)
+		// If the removed device was the selected one, clear the details view
+		if m.DetailsTable.SelectedPaired != nil && m.DetailsTable.SelectedPaired.Path == msg.Path {
+			m.DetailsTable.SelectedPaired = nil
+		}
+
 		cmds = append(cmds, dbus.WaitForDBusSignal(m.Conn, m.DBusSignals))
 
 	case common.DeviceUpdateMsg:
+		// This message comes on startup with the full list of devices.
+		// We just need to filter and split them.
 		paired, unpaired := filterDevicesByPaired(msg)
-
 		m.PairedDevices = paired
 		m.UnpairedDevices = unpaired
 
-		if m.PairedDevices == nil {
-			m.PairedDevices = make([]common.Device, 0)
-		}
-		if m.UnpairedDevices == nil {
-			m.UnpairedDevices = make([]common.Device, 0)
-		}
-
-		_, cmd := m.DevicesTable.Update(msg); cmds = append(cmds, cmd)
-		_, cmd = m.ScannedTable.Update(msg); cmds = append(cmds, cmd)
-
-		cmd = func() tea.Cmd {
-			return func() tea.Msg {
-				if len(m.PairedDevices) > 0 {
-					return common.DeviceSelectedMsg{Device: m.PairedDevices[0]}
-				} else {
-					return common.DeviceSelectedMsg{Device: common.BlankDevice}
-				}
+		// Automatically select the first paired device on startup, if it exists.
+		cmd := func() tea.Msg {
+			if len(m.PairedDevices) > 0 {
+				return common.DeviceSelectedMsg{Device: &m.PairedDevices[0]}
 			}
-		}()
-
+			return common.DeviceSelectedMsg{Device: nil} // Otherwise, select nothing.
+		}
 		cmds = append(cmds, cmd)
 		cmds = append(cmds, dbus.WaitForDBusSignal(m.Conn, m.DBusSignals))
 
 	case common.DeviceSelectedMsg:
-		_, cmd := m.DetailsTable.Update(msg); cmds = append(cmds, cmd)
+		m.DetailsTable.SelectedPaired = msg.Device
+		// This is a UI update, no need to wait for another D-Bus signal.
+		return m, nil
+
+	case common.ScanToggleMsg:
+		m.IsScanning = !m.IsScanning
 		cmds = append(cmds, dbus.WaitForDBusSignal(m.Conn, m.DBusSignals))
 
 	case common.ErrMsg:
 		m.Err = msg.Err
 
 	case tea.KeyMsg:
+		// Give the active table the key press.
+		var cmd tea.Cmd
+		switch m.SelectedTable {
+		case 0: // Adapters
+			_, cmd = m.AdapterTable.Update(msg)
+		case 1: // Paired Devices
+			_, cmd = m.DevicesTable.Update(msg)
+			// Also forward horizontal movement to details table
+			if msg.String() == "left" || msg.String() == "h" || msg.String() == "right" || msg.String() == "l" {
+				_, cmd = m.DetailsTable.Update(msg)
+			}
+		case 2: // Scanned Devices
+			_, cmd = m.ScannedTable.Update(msg)
+		}
+		cmds = append(cmds, cmd)
+
 		switch msg.String() {
 		case "enter", " ":
 			switch m.SelectedTable {
@@ -265,7 +314,14 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmd := dbus.ForgetDeviceCmd(m.Conn, m.Adapters[0].Path, device.Path)
 					cmds = append(cmds, cmd)
 				}
+			case 2:
+				if len(m.UnpairedDevices) > m.ScannedTable.SelectedRow {
+					device := &m.UnpairedDevices[m.ScannedTable.SelectedRow]
+					cmd := dbus.PairDeviceCmd(m.Conn, device.Path)
+					cmds = append(cmds, cmd)
+				}
 			}
+
 		case "ctrl+c", "ctrl+q":
 			m.Conn.RemoveSignal(m.DBusSignals)
 			m.Conn.Close()
@@ -294,31 +350,34 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "left", "h", "right", "l":
-			if m.SelectedTable == 1 {
-				_, cmd := m.DetailsTable.Update(msg)
-				cmds = append(cmds, cmd)
-			}
+			// This is now handled above and forwarded to the details table
+			// if the paired devices table is selected.
 		case "up", "k", "down", "j":
-			tables := []*models.TableData{
-				m.AdapterTable,
-				m.DevicesTable,
-				m.DetailsTable,
-				m.ScannedTable,
-			}
-
-			_, cmd := tables[m.SelectedTable].Update(msg)
-			cmds = append(cmds, cmd)
+			// This is now handled by the active table directly.
 		case "s":
-			if (!m.IsScanning) {
-				cmds = append(cmds, dbus.StartScanning(m.Conn, &m.Adapters[0].Path))
-			} else {
-				cmds = append(cmds, dbus.StopScanning(m.Conn, &m.Adapters[0].Path))
+			if len(m.Adapters) > 0 {
+				if !m.IsScanning {
+					cmds = append(cmds, dbus.StartScanning(m.Conn, &m.Adapters[0].Path))
+				} else {
+					cmds = append(cmds, dbus.StopScanning(m.Conn, &m.Adapters[0].Path))
+				}
 			}
 		}
 
-		_, cmd := m.DevicesTable.Update(msg); cmds = append(cmds, cmd)
-		_, cmd = m.ScannedTable.Update(msg); cmds = append(cmds, cmd)
+		// After any action, give the tables the latest data to render.
+		m.AdapterTable.Adapters = m.Adapters
+		m.DevicesTable.PairedDevices = m.PairedDevices
+		m.ScannedTable.ScannedDevices = m.UnpairedDevices
 	}
+
+	// Sort unpaired devices by RSSI to prevent flickering
+	sortDevicesByRSSI(m.PairedDevices)
+	sortDevicesByRSSI(m.UnpairedDevices)
+
+	// Always ensure tables have the latest data before rendering
+	m.AdapterTable.Adapters = m.Adapters
+	m.DevicesTable.PairedDevices = m.PairedDevices
+	m.ScannedTable.ScannedDevices = m.UnpairedDevices
 
 	return m, tea.Batch(cmds...)
 }
@@ -328,11 +387,22 @@ func (m *BluepalaData) View() string {
 		return fmt.Sprintf("An error occurred: %v\n\nPress 'ctrl+q' to quit.", m.Err)
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, 
+	var rightPane string
+	devicesWidth := m.Width // Default to full width
+
+	// If a device is selected, show the details pane and shrink the devices table.
+	if m.DetailsTable.SelectedPaired != nil {
+		rightPane = m.DetailsTable.View()
+		devicesWidth = m.Width - 36
+	}
+
+	m.DevicesTable.Width = devicesWidth
+
+	return lipgloss.JoinVertical(lipgloss.Left,
 		m.AdapterTable.View(),
 		strings.TrimSpace(common.HJoin(
 			m.DevicesTable.View(),
-			m.DetailsTable.View(),
+			rightPane,
 			m.DevicesTable.Width,
 			m.DetailsTable.Width,
 		)),
@@ -362,4 +432,21 @@ func filterDevicesByPaired(devices []common.Device) ([]common.Device, []common.D
 	}
 
 	return pairedDevices, unpairedDevices
+}
+
+func removeDeviceByPath(devices []common.Device, path godbus.ObjectPath) []common.Device {
+	for i, device := range devices {
+		if device.Path == path {
+			return append(devices[:i], devices[i+1:]...)
+		}
+	}
+	return devices
+}
+
+// sortDevicesByRSSI sorts a slice of devices by RSSI in descending order.
+func sortDevicesByRSSI(devices []common.Device) {
+	slices.SortFunc(devices, func(d1, d2 common.Device) int {
+		// Higher RSSI (less negative) is better.
+		return int(d1.RSSI - d2.RSSI)
+	})
 }

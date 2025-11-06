@@ -73,7 +73,10 @@ func ConnectToDeviceCmd(conn *dbus.Conn, devices []common.Device, device *common
 			return common.ErrMsg{Err: call.Err}
 		}
 
-		return common.DeviceUpdateMsg(devices)
+		// On success, we don't need to return anything.
+		// BlueZ will emit a "PropertiesChanged" signal for the "Connected" property,
+		// which our main event loop will catch and use to update the UI.
+		return nil
 	}
 }
 
@@ -136,7 +139,7 @@ func StartScanning(conn *dbus.Conn, adapterPath *dbus.ObjectPath) tea.Cmd {
 		if call.Err != nil {
 			return common.ErrMsg{Err: fmt.Errorf("failed to start discovery: %v", call.Err)}
 		}
-		return nil
+		return common.ScanToggleMsg{}
 	}
 }
 
@@ -148,6 +151,6 @@ func StopScanning(conn *dbus.Conn, adapterPath *dbus.ObjectPath) tea.Cmd {
 		if call.Err != nil {
 			return common.ErrMsg{Err: fmt.Errorf("failed to stop discovery: %v", call.Err)}
 		}
-		return nil
+		return common.ScanToggleMsg{}
 	}
 }

@@ -35,12 +35,13 @@ func WaitForDBusSignal(conn *dbus.Conn, sig chan *dbus.Signal) tea.Cmd {
 			if !ok {
 				break
 			}
+
 			// Send a message with just the *new* device's data
 			return common.DeviceAddedMsg{
 				Path:       path,
 				Interfaces: interfaces,
 			}
-
+			
 		case bluetooth.ObjectManagerIF + ".InterfacesRemoved":
 			// A device has been removed (e.g., "forgotten" or disconnected)
 			if len(s.Body) < 1 {
@@ -71,7 +72,13 @@ func WaitForDBusSignal(conn *dbus.Conn, sig chan *dbus.Signal) tea.Cmd {
 			}
 
 			// We only care about changes to Adapters, Devices, or Batteries
-			if iface == bluetooth.AdapterIF || iface == bluetooth.DeviceIF || iface == bluetooth.BatteryIF {
+			if iface == bluetooth.AdapterIF {
+				return common.AdapterPropertiesChangedMsg{
+					Path:    s.Path,
+					Changes: changes,
+				}
+			}
+			if iface == bluetooth.DeviceIF || iface == bluetooth.BatteryIF {
 				// Send a message with *only* the properties that changed
 				return common.DevicePropertiesChangedMsg{
 					Path:    s.Path, // The signal is emitted on the object that changed

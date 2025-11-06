@@ -1,9 +1,9 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"log"
+	"regexp"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -17,43 +17,225 @@ const (
 	propertiesInterface    = "org.freedesktop.DBus.Properties"
 )
 
-type BluetoothScanner struct {
-	conn        *dbus.Conn
-	adapterPath dbus.ObjectPath
-}
+func main() {
+	fmt.Println("🔍 Bluetooth Diagnostic Tool")
+	fmt.Println("==============================")
 
-// NewBluetoothScanner creates a new Bluetooth scanner instance
-func NewBluetoothScanner() (*BluetoothScanner, error) {
+	// Check system status first
+	if err := checkBluetoothStatus(); err != nil {
+		log.Fatalf("❌ System check failed: %v", err)
+	}
+
+	// Set up D-Bus connection
 	conn, err := dbus.SystemBus()
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to system bus: %v", err)
+		log.Fatal("❌ Failed to connect to system bus:", err)
+	}
+	defer conn.Close()
+
+	// Set up signal monitoring
+	sig := make(chan *dbus.Signal, 100)
+	conn.Signal(sig)
+
+	// Add signal matches
+	if err := setupSignalMatches(conn); err != nil {
+		log.Printf("⚠️ Warning: some signal matches failed: %v", err)
 	}
 
-	scanner := &BluetoothScanner{
-		conn: conn,
+	fmt.Println("\n🎯 Starting Bluetooth discovery...")
+	fmt.Println("Listening for devices for 30 seconds...")
+	fmt.Println("Make sure Bluetooth is enabled and discoverable!")
+	fmt.Println("================================================")
+
+	// Start discovery on the default adapter
+	if err := startDiscovery(conn); err != nil {
+		log.Printf("⚠️ Could not start discovery: %v", err)
+		log.Println("Continuing anyway - there might be existing devices...")
 	}
 
-	// Find the default adapter
-	adapterPath, err := scanner.findDefaultAdapter()
+	// Listen for signals for 30 seconds
+	timeout := time.After(30 * time.Second)
+	deviceCount := 0
+
+	for {
+		select {
+		case s := <-sig:
+			if s.Name == objectManagerInterface+".InterfacesAdded" {
+				if len(s.Body) >= 2 {
+					if path, ok := s.Body[0].(dbus.ObjectPath); ok {
+						if interfaces, ok := s.Body[1].(map[string]map[string]dbus.Variant); ok {
+							if _, exists := interfaces[bluezDeviceInterface]; exists {
+								deviceCount++
+
+								if IsUsableDevice(interfaces) {
+									fmt.Printf("\n=== DEVICE #%d: %s ===\n", deviceCount, path)
+									debugDeviceProperties(interfaces)
+									testFilters(interfaces)
+								}
+							}
+						}
+					}
+				}
+			} else if s.Name == propertiesInterface+".PropertiesChanged" {
+				// Also log property changes for debugging
+				if len(s.Body) >= 2 {
+					fmt.Printf("\n🔧 Properties changed on %s\n", s.Path)
+				}
+			}
+
+		case <-timeout:
+			fmt.Println("\n================================================")
+			fmt.Printf("⏰ Diagnostic completed. Found %d devices.\n", deviceCount)
+			
+			if deviceCount == 0 {
+				fmt.Println("❌ No devices found. Possible issues:")
+				fmt.Println("   - Bluetooth adapter not powered on")
+				fmt.Println("   - No discoverable devices in range")
+				fmt.Println("   - Discovery not started properly")
+				fmt.Println("   - Permission issues")
+			} else {
+				fmt.Println("✅ Devices were detected but may be filtered out")
+			}
+			
+			// Stop discovery before exiting
+			stopDiscovery(conn)
+			return
+		}
+	}
+}
+
+func IsUsableDevice(interfaces map[string]map[string]dbus.Variant) bool {
+	props, exists := interfaces["org.bluez.Device1"]
+	if !exists {
+		return false
+	}
+
+	// Check name (not MAC address)
+	if nameVar, exists := props["Name"]; exists {
+		if name := nameVar.Value().(string); name != "" {
+			// Check if name is NOT a MAC address
+			macPattern := `^[0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}$`
+			if matched, _ := regexp.MatchString(macPattern, name); !matched {
+				return true
+			}
+		}
+	}
+
+	// Check appearance
+	if appearanceVar, exists := props["Appearance"]; exists {
+		if appearance := appearanceVar.Value().(uint16); appearance != 0 {
+			wantedAppearances := map[uint16]bool{
+				0x0040: true, // Computer
+				0x0140: true, // Phone
+				0x0440: true, // Headphones
+				0x0441: true, // Headset
+				0x0408: true, // Car
+				0x0540: true, // Clock
+				0x04C0: true, // Wearable
+			}
+			if wantedAppearances[appearance] {
+				return true
+			}
+		}
+	}
+
+	// Check UUIDs
+	if uuidsVar, exists := props["UUIDs"]; exists {
+		if uuids := uuidsVar.Value().([]string); len(uuids) > 0 {
+			usefulServices := map[string]bool{
+				"0000110a-0000-1000-8000-00805f9b34fb": true, // A2DP Source
+				"0000110b-0000-1000-8000-00805f9b34fb": true, // A2DP Sink  
+				"00001108-0000-1000-8000-00805f9b34fb": true, // HSP
+				"0000111e-0000-1000-8000-00805f9b34fb": true, // HFP
+				"00001112-0000-1000-8000-00805f9b34fb": true, // HID
+				"00001124-0000-1000-8000-00805f9b34fb": true, // AVRCP
+				"0000180f-0000-1000-8000-00805f9b34fb": true, // Battery
+				"0000180a-0000-1000-8000-00805f9b34fb": true, // Device Information
+			}
+			for _, uuid := range uuids {
+				if usefulServices[uuid] {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func checkBluetoothStatus() error {
+	conn, err := dbus.SystemBus()
 	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to find default Bluetooth adapter: %v", err)
+		return fmt.Errorf("D-Bus not available: %v", err)
 	}
 
-	scanner.adapterPath = adapterPath
-	fmt.Printf("Using Bluetooth adapter: %s\n", adapterPath)
-	return scanner, nil
-}
-
-// Close closes the D-Bus connection
-func (bs *BluetoothScanner) Close() {
-	bs.conn.Close()
-}
-
-// findDefaultAdapter finds the first available Bluetooth adapter
-func (bs *BluetoothScanner) findDefaultAdapter() (dbus.ObjectPath, error) {
+	// Check if BlueZ is running
 	var objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
-	err := bs.conn.Object(bluezBusName, "/").Call(objectManagerInterface+".GetManagedObjects", 0).Store(&objects)
+	err = conn.Object(bluezBusName, "/").Call(objectManagerInterface+".GetManagedObjects", 0).Store(&objects)
+	if err != nil {
+		return fmt.Errorf("BlueZ not running or accessible: %v", err)
+	}
+
+	// Find adapters
+	var adapters []string
+	var poweredAdapters []string
+	
+	for path, interfaces := range objects {
+		if adapterProps, exists := interfaces[bluezAdapterInterface]; exists {
+			adapterPath := string(path)
+			adapters = append(adapters, adapterPath)
+			
+			// Check if adapter is powered on
+			if poweredVar, exists := adapterProps["Powered"]; exists {
+				if powered, ok := poweredVar.Value().(bool); ok && powered {
+					poweredAdapters = append(poweredAdapters, adapterPath)
+				}
+			}
+		}
+	}
+
+	if len(adapters) == 0 {
+		return fmt.Errorf("no Bluetooth adapters found")
+	}
+
+	fmt.Printf("✅ Found %d adapter(s):\n", len(adapters))
+	for i, adapter := range adapters {
+		fmt.Printf("   %d. %s\n", i+1, adapter)
+	}
+
+	if len(poweredAdapters) == 0 {
+		return fmt.Errorf("no powered Bluetooth adapters - please turn on Bluetooth")
+	}
+
+	fmt.Printf("✅ %d adapter(s) powered on\n", len(poweredAdapters))
+	return nil
+}
+
+func setupSignalMatches(conn *dbus.Conn) error {
+	matches := []struct {
+		iface  string
+		member string
+	}{
+		{objectManagerInterface, "InterfacesAdded"},
+		{objectManagerInterface, "InterfacesRemoved"},
+		{propertiesInterface, "PropertiesChanged"},
+	}
+
+	for _, match := range matches {
+		err := conn.AddMatchSignal(
+			dbus.WithMatchInterface(match.iface),
+			dbus.WithMatchMember(match.member),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to add match for %s.%s: %v", match.iface, match.member, err)
+		}
+	}
+	return nil
+}
+
+func findDefaultAdapter(conn *dbus.Conn) (dbus.ObjectPath, error) {
+	var objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
+	err := conn.Object(bluezBusName, "/").Call(objectManagerInterface+".GetManagedObjects", 0).Store(&objects)
 	if err != nil {
 		return "", err
 	}
@@ -67,242 +249,167 @@ func (bs *BluetoothScanner) findDefaultAdapter() (dbus.ObjectPath, error) {
 	return "", fmt.Errorf("no Bluetooth adapter found")
 }
 
-// StartScanning starts Bluetooth device discovery
-func (bs *BluetoothScanner) StartScanning() error {
-	obj := bs.conn.Object(bluezBusName, bs.adapterPath)
+func startDiscovery(conn *dbus.Conn) error {
+	adapterPath, err := findDefaultAdapter(conn)
+	if err != nil {
+		return err
+	}
+
+	obj := conn.Object(bluezBusName, adapterPath)
 	call := obj.Call(bluezAdapterInterface+".StartDiscovery", 0)
 	if call.Err != nil {
-		return fmt.Errorf("failed to start discovery: %v", call.Err)
+		return call.Err
 	}
-	fmt.Println("✅ Bluetooth scanning started")
+
+	fmt.Printf("✅ Started discovery on adapter: %s\n", adapterPath)
 	return nil
 }
 
-// StopScanning stops Bluetooth device discovery
-func (bs *BluetoothScanner) StopScanning() error {
-	obj := bs.conn.Object(bluezBusName, bs.adapterPath)
-	call := obj.Call(bluezAdapterInterface+".StopDiscovery", 0)
-	if call.Err != nil {
-		return fmt.Errorf("failed to stop discovery: %v", call.Err)
-	}
-	fmt.Println("❌ Bluetooth scanning stopped")
-	return nil
-}
-
-// ToggleScanning toggles the scanning state
-func (bs *BluetoothScanner) ToggleScanning() error {
-	isScanning, err := bs.IsScanning()
+func stopDiscovery(conn *dbus.Conn) {
+	adapterPath, err := findDefaultAdapter(conn)
 	if err != nil {
-		return fmt.Errorf("failed to get scanning state: %v", err)
+		return
 	}
 
-	if isScanning {
-		return bs.StopScanning()
+	obj := conn.Object(bluezBusName, adapterPath)
+	obj.Call(bluezAdapterInterface+".StopDiscovery", 0)
+	fmt.Printf("✅ Stopped discovery on adapter: %s\n", adapterPath)
+}
+
+func debugDeviceProperties(interfaces map[string]map[string]dbus.Variant) {
+	props, exists := interfaces[bluezDeviceInterface]
+	if !exists {
+		fmt.Println("❌ No Device1 interface found")
+		return
+	}
+
+	fmt.Println("Raw properties dump:")
+	for key, value := range props {
+		fmt.Printf("   %s: %v (type: %T)\n", key, value.Value(), value.Value())
+	}
+}
+
+func testFilters(interfaces map[string]map[string]dbus.Variant) {
+	props, exists := interfaces[bluezDeviceInterface]
+	if !exists {
+		return
+	}
+
+	fmt.Println("Filter tests:")
+	
+	// Test name filter
+	name := ""
+	if nameVar, exists := props["Name"]; exists {
+		name = nameVar.Value().(string)
+		fmt.Printf("   📝 Name: '%s' (is MAC: %v)\n", name, isMACAddressName(name))
 	} else {
-		return bs.StartScanning()
+		fmt.Println("   📝 Name: <missing>")
 	}
+
+	// Test appearance filter
+	if appearanceVar, exists := props["Appearance"]; exists {
+		appearance := appearanceVar.Value().(uint16)
+		fmt.Printf("   🎯 Appearance: 0x%04x (%d) - wanted: %v\n", 
+			appearance, appearance, isWantedAppearance(appearance))
+	} else {
+		fmt.Println("   🎯 Appearance: <missing>")
+	}
+
+	// Test UUIDs filter
+	if uuidsVar, exists := props["UUIDs"]; exists {
+		uuids := uuidsVar.Value().([]string)
+		fmt.Printf("   🔧 UUIDs: %v - useful: %v\n", uuids, hasUsefulServices(uuids))
+	} else {
+		fmt.Println("   🔧 UUIDs: <missing>")
+	}
+
+	// Test RSSI
+	if rssiVar, exists := props["RSSI"]; exists {
+		rssi := rssiVar.Value().(int16)
+		fmt.Printf("   📶 RSSI: %d\n", rssi)
+	} else {
+		fmt.Println("   📶 RSSI: <missing>")
+	}
+
+	// Test if it would pass our filters
+	fmt.Printf("   ✅ Would pass filter: %v\n", wouldPassFilter(interfaces))
 }
 
-// IsScanning checks if the adapter is currently scanning
-func (bs *BluetoothScanner) IsScanning() (bool, error) {
-	obj := bs.conn.Object(bluezBusName, bs.adapterPath)
-	variant, err := obj.GetProperty(bluezAdapterInterface + ".Discovering")
-	if err != nil {
-		return false, err
+func isMACAddressName(name string) bool {
+	if name == "" {
+		return false
 	}
-
-	discovering, ok := variant.Value().(bool)
-	if !ok {
-		return false, fmt.Errorf("unexpected type for Discovering property")
-	}
-
-	return discovering, nil
+	// MAC address pattern: XX-XX-XX-XX-XX-XX or XX:XX:XX:XX:XX:XX
+	macPattern := `^[0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}$`
+	matched, _ := regexp.MatchString(macPattern, name)
+	return matched
 }
 
-// GetScanningStatus returns the current scanning status as a string
-func (bs *BluetoothScanner) GetScanningStatus() (string, error) {
-	isScanning, err := bs.IsScanning()
-	if err != nil {
-		return "", err
+func isWantedAppearance(appearance uint16) bool {
+	wantedAppearances := map[uint16]string{
+		0x0040: "Computer",
+		0x0140: "Phone", 
+		0x0440: "Headphones",
+		0x0441: "Headset",
+		0x0408: "Car",
+		0x0540: "Clock",
+		0x04C0: "Wearable",
 	}
-
-	if isScanning {
-		return "Scanning is ACTIVE", nil
-	}
-	return "Scanning is INACTIVE", nil
+	_, found := wantedAppearances[appearance]
+	return found
 }
 
-// ScanForDuration starts scanning and runs for the specified duration, watching for devices
-func (bs *BluetoothScanner) ScanForDuration(duration time.Duration) error {
-	fmt.Printf("Starting scan for %v...\n", duration)
+func hasUsefulServices(uuids []string) bool {
+	usefulServices := []string{
+		"0000110a-0000-1000-8000-00805f9b34fb", // A2DP Source
+		"0000110b-0000-1000-8000-00805f9b34fb", // A2DP Sink  
+		"00001108-0000-1000-8000-00805f9b34fb", // HSP
+		"0000111e-0000-1000-8000-00805f9b34fb", // HFP
+		"00001112-0000-1000-8000-00805f9b34fb", // HID
+		"00001124-0000-1000-8000-00805f9b34fb", // AVRCP
+		"0000180f-0000-1000-8000-00805f9b34fb", // Battery
+		"0000180a-0000-1000-8000-00805f9b34fb", // Device Information
+	}
 	
-	// Start discovery
-	if err := bs.StartScanning(); err != nil {
-		return err
-	}
-
-	// Set up signal matching for new devices
-	err := bs.conn.AddMatchSignal(
-		dbus.WithMatchInterface(objectManagerInterface),
-		dbus.WithMatchMember("InterfacesAdded"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to add signal match: %v", err)
-	}
-
-	signals := make(chan *dbus.Signal, 10)
-	bs.conn.Signal(signals)
-
-	// Create timer for the scan duration
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-
-	fmt.Println("Listening for Bluetooth devices...")
-	fmt.Println("Press Ctrl+C to stop early")
-
-	for {
-		select {
-		case signal := <-signals:
-			if signal.Name == objectManagerInterface+".InterfacesAdded" {
-				bs.handleNewDevice(signal)
-			}
-		case <-timer.C:
-			fmt.Println("\nScan duration completed")
-			bs.StopScanning()
-			return nil
-		}
-	}
-}
-
-// handleNewDevice processes signals for newly discovered devices
-func (bs *BluetoothScanner) handleNewDevice(signal *dbus.Signal) {
-	if len(signal.Body) >= 2 {
-		if path, ok := signal.Body[0].(dbus.ObjectPath); ok {
-			if interfaces, ok := signal.Body[1].(map[string]map[string]dbus.Variant); ok {
-				for intf, props := range interfaces {
-					if intf == bluezDeviceInterface {
-						// The extractDeviceInfo function expects a map of interfaces,
-						// so we wrap the device properties in a map with the interface name as the key.
-						deviceInterfaces := map[string]map[string]dbus.Variant{
-							bluezDeviceInterface: props,
-						}
-						deviceInfo := bs.extractDeviceInfo(deviceInterfaces)
-						fmt.Printf("📱 Found device: %s (%s) - %s\n",
-							deviceInfo["Name"], deviceInfo["Address"], path)
-					}
-				}
+	for _, uuid := range uuids {
+		for _, useful := range usefulServices {
+			if uuid == useful {
+				return true
 			}
 		}
 	}
+	return false
 }
 
-// extractDeviceInfo extracts device information from properties
-func (bs *BluetoothScanner) extractDeviceInfo(props map[string]map[string]dbus.Variant) map[string]string {
-	info := make(map[string]string)
-	
-	if nameVar, exists := props[bluezDeviceInterface]["Name"]; exists {
-		if name, ok := nameVar.Value().(string); ok {
-			info["Name"] = name
-		}
-	}
-	
-	if addrVar, exists := props[bluezDeviceInterface]["Address"]; exists {
-		if addr, ok := addrVar.Value().(string); ok {
-			info["Address"] = addr
-		}
-	}
-	
-	if info["Name"] == "" {
-		info["Name"] = "Unknown"
-	}
-	
-	return info
-}
-
-// GetDiscoveredDevices returns a list of currently discovered devices
-func (bs *BluetoothScanner) GetDiscoveredDevices() ([]map[string]string, error) {
-	var objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
-	err := bs.conn.Object(bluezBusName, "/").Call(objectManagerInterface+".GetManagedObjects", 0).Store(&objects)
-	if err != nil {
-		return nil, err
+func wouldPassFilter(interfaces map[string]map[string]dbus.Variant) bool {
+	props, exists := interfaces[bluezDeviceInterface]
+	if !exists {
+		return false
 	}
 
-	var devices []map[string]string
-	for path, interfaces := range objects {
-		if _, exists := interfaces[bluezDeviceInterface]; exists {
-			deviceInfo := bs.extractDeviceInfo(interfaces)
-			deviceInfo["Path"] = string(path)
-			devices = append(devices, deviceInfo)
+	// Check if it has a proper name (not MAC address)
+	if nameVar, exists := props["Name"]; exists {
+		name := nameVar.Value().(string)
+		if name != "" && !isMACAddressName(name) {
+			return true
 		}
 	}
 
-	return devices, nil
-}
-
-// PrintDiscoveredDevices prints all currently discovered devices
-func (bs *BluetoothScanner) PrintDiscoveredDevices() error {
-	devices, err := bs.GetDiscoveredDevices()
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("\n📋 Discovered Devices (%d):\n", len(devices))
-	for i, device := range devices {
-		fmt.Printf("  %d. %s (%s)\n", i+1, device["Name"], device["Address"])
-	}
-	return nil
-}
-
-func main() {
-	// Define command line flags
-	start := flag.Bool("start", false, "Start Bluetooth scanning")
-	stop := flag.Bool("stop", false, "Stop Bluetooth scanning")
-	toggle := flag.Bool("toggle", false, "Toggle Bluetooth scanning")
-	status := flag.Bool("status", false, "Check scanning status")
-	scan := flag.Duration("scan", 0*time.Second, "Scan for specified duration (e.g., 30s, 1m)")
-	list := flag.Bool("list", false, "List discovered devices")
-	flag.Parse()
-
-	// Create Bluetooth scanner
-	scanner, err := NewBluetoothScanner()
-	if err != nil {
-		log.Fatal("Error:", err)
-	}
-	defer scanner.Close()
-
-	// Execute commands based on flags
-	switch {
-	case *start:
-		err = scanner.StartScanning()
-	case *stop:
-		err = scanner.StopScanning()
-	case *toggle:
-		err = scanner.ToggleScanning()
-	case *status:
-		status, err := scanner.GetScanningStatus()
-		if err != nil {
-			log.Fatal("Error:", err)
+	// Check if it has a wanted appearance
+	if appearanceVar, exists := props["Appearance"]; exists {
+		appearance := appearanceVar.Value().(uint16)
+		if isWantedAppearance(appearance) {
+			return true
 		}
-		fmt.Println(status)
-	case *scan > 0:
-		err = scanner.ScanForDuration(*scan)
-		if err == nil {
-			scanner.PrintDiscoveredDevices()
-		}
-	case *list:
-		err = scanner.PrintDiscoveredDevices()
-	default:
-		fmt.Println("Bluetooth Scanner Tool")
-		fmt.Println("Usage:")
-		flag.PrintDefaults()
-		fmt.Println("\nExamples:")
-		fmt.Println("  ./bluetooth-scanner -start")
-		fmt.Println("  ./bluetooth-scanner -scan 30s")
-		fmt.Println("  ./bluetooth-scanner -status")
-		fmt.Println("  ./bluetooth-scanner -toggle")
 	}
 
-	if err != nil {
-		log.Fatal("Error:", err)
+	// Check if it has useful services
+	if uuidsVar, exists := props["UUIDs"]; exists {
+		uuids := uuidsVar.Value().([]string)
+		if hasUsefulServices(uuids) {
+			return true
+		}
 	}
+
+	return false
 }

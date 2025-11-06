@@ -71,7 +71,7 @@ func FormatAdapters(conn *dbus.Conn, adapters []Adapter, width int) [][]string {
 func FormatDevices(devices []Device, selectedRow int, width int, height int) [][]string {
 	align := lipgloss.Left
 	data := [][]string{
-		padHeaders([]string{"", "Type", "Name", "Connected"}, []int{3, 11, -1, 9}, width, &align), {""},
+		padHeaders([]string{"", "Type", "Name", "Connected"}, []int{5, 15, -1, 11}, width, &align), {""},
 	}
 
 	for i, d := range devices {
@@ -96,7 +96,7 @@ func FormatDevices(devices []Device, selectedRow int, width int, height int) [][
 		data = append(data, row)
 	}
 
-	for range height {
+	for range (height - len(data)) {
 		data = append(data, []string{""})
 	}
 	

@@ -10,6 +10,11 @@ type PeriodicRefreshMsg []Adapter
 type DeviceUpdateMsg []Device
 
 // --- D-Bus Signal Messages ---
+type AdapterPropertiesChangedMsg struct {
+	Path    dbus.ObjectPath
+	Changes map[string]dbus.Variant
+}
+
 type DevicePropertiesChangedMsg struct {
 	Path    dbus.ObjectPath
 	Changes map[string]dbus.Variant // Map of property name to new value
@@ -17,7 +22,7 @@ type DevicePropertiesChangedMsg struct {
 
 // DeviceSelectedMsg is sent when a device is selected for our details table
 type DeviceSelectedMsg struct {
-	Device Device
+	Device *Device
 }
 
 // DeviceAddedMsg is sent when a new device is discovered
@@ -30,6 +35,9 @@ type DeviceAddedMsg struct {
 type DeviceRemovedMsg struct {
 	Path dbus.ObjectPath
 }
+
+// ScanToggleMsg is sent when scanning is started or stopped
+type ScanToggleMsg struct{}
 
 // ErrMsg reports a generic error from a goroutine
 type ErrMsg struct{ Err error }
