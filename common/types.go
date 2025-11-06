@@ -43,8 +43,26 @@ type ScanToggleMsg struct{}
 type ErrMsg struct{ Err error }
 
 // --- Modal/Form Messages ---
-type SubmitConfirmationMsg struct {
-	Value bool
+// ShowPinModalMsg is sent *from* the agent *to* the TUI
+type ShowPinModalMsg struct {
+	DevicePath dbus.ObjectPath
+}
+
+// ShowConfirmModalMsg is sent *from* the agent *to* the TUI
+type ShowConfirmModalMsg struct {
+	DeviceName string
+	DevicePath dbus.ObjectPath
+	Passkey    uint32
+}
+
+// SubmitPinMsg is sent *from* the TUI (modal) *to* the Update loop
+type SubmitPinMsg struct {
+	Pin string
+}
+
+// SubmitConfirmMsg is sent *from* the TUI (modal) *to* the Update loop
+type SubmitConfirmMsg struct {
+	Confirmed bool
 }
 
 // --- Data Models ---

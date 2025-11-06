@@ -6,6 +6,7 @@ import (
 	"bluepala/common"
 	"fmt"
 	"os/exec"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/godbus/dbus/v5"
@@ -54,6 +55,40 @@ func ToggleAdapterPowerCmd(conn *dbus.Conn, adapterPath string, state bool) erro
 	)
 	
 	return call.Err
+}
+
+func RegisterAgentCmd(conn *dbus.Conn, appAgent *bluetooth.BluepalaAgent) tea.Cmd {
+	return func() tea.Msg {
+		// 1. Export the agent object
+		err := conn.Export(appAgent, bluetooth.AgentPath, bluetooth.AgentIF)
+		if err != nil {
+			return common.ErrMsg{Err: fmt.Errorf("failed to export agent: %w", err)}
+		}
+
+		// 2. Get the AgentManager
+		obj := conn.Object(bluetooth.BluezDest, bluetooth.AgentManagerPath)
+
+		// 3. Tell AgentManager to register our agent
+		// We set it as "DisplayYesNo" capability to handle simple confirmations.
+		// The first argument MUST be explicitly cast to dbus.ObjectPath.
+		call := obj.Call(bluetooth.AgentManagerIF+".RegisterAgent", 0, dbus.ObjectPath(bluetooth.AgentPath), "DisplayYesNo")
+		
+		if call.Err != nil {
+			// If it's already registered, that's fine
+			if !strings.Contains(call.Err.Error(), "Already Exists") {
+				return common.ErrMsg{Err: fmt.Errorf("failed to register agent: %w", call.Err)}
+			}
+		}
+
+		// 4. (Optional but recommended) Make it the default agent
+		call = obj.Call(bluetooth.AgentManagerIF+".RequestDefaultAgent", 0, dbus.ObjectPath(bluetooth.AgentPath))
+		if call.Err != nil {
+			return common.ErrMsg{Err: fmt.Errorf("failed to request default agent: %w", call.Err)}
+		}
+		
+		// We don't return a message, we just want it to be registered.
+		return nil
+	}
 }
 
 // Non-blocking connection command
@@ -128,6 +163,32 @@ func PairDeviceCmd(conn *dbus.Conn, devicePath dbus.ObjectPath) tea.Cmd {
 		// Our 'WaitForDBusSignal' listener will eventually
 		// receive a 'PropertiesChanged' signal for 'Paired = true'
 		// if the pairing succeeds.
+		return nil
+	}
+}
+
+func TrustDeviceCmd(conn *dbus.Conn, devicePath dbus.ObjectPath) tea.Cmd {
+	return func() tea.Msg {
+		deviceObj := conn.Object(bluetooth.BluezDest, devicePath)
+		
+		// We set the "Trusted" property to true
+		call := deviceObj.Call(
+			bluetooth.PropsIF+".Set",
+			0,
+			bluetooth.DeviceIF, // Interface
+			"Trusted",          // Property
+			dbus.MakeVariant(true), // Value
+		)
+
+		if call.Err != nil {
+			// Don't error if it's already trusted
+			if !strings.Contains(call.Err.Error(), "Already Exists") {
+				return common.ErrMsg{Err: fmt.Errorf("trust failed: %w", call.Err)}
+			}
+		}
+
+		// Success! We return nil and wait for the
+		// 'PropertiesChanged' signal for 'Trusted = true'.
 		return nil
 	}
 }

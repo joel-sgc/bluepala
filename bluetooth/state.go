@@ -10,13 +10,17 @@ import (
 
 // BlueZ D-Bus constants
 const (
-	BluezDest       = "org.bluez"
-	BluezPath       = "/"
-	ObjectManagerIF = "org.freedesktop.DBus.ObjectManager"
-	AdapterIF       = "org.bluez.Adapter1"
-	DeviceIF        = "org.bluez.Device1"
-	BatteryIF       = "org.bluez.Battery1" // For battery level
-	PropsIF         = "org.freedesktop.DBus.Properties"
+	BluezDest        = "org.bluez"
+	BluezPath        = "/"
+	ObjectManagerIF  = "org.freedesktop.DBus.ObjectManager"
+	AdapterIF        = "org.bluez.Adapter1"
+	DeviceIF         = "org.bluez.Device1"
+	BatteryIF        = "org.bluez.Battery1" // For battery level
+	AgentIF          = "org.bluez.Agent1"
+	PropsIF          = "org.freedesktop.DBus.Properties"
+	AgentPath        = "/org/bluepala/agent"
+	AgentManagerIF   = "org.bluez.AgentManager1"
+	AgentManagerPath = "/org/bluez"
 )
 
 var BluetoothTypes = map[string]string{

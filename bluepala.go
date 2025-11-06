@@ -7,6 +7,7 @@ import (
 	"bluepala/dbus"
 	"bluepala/models"
 	"fmt"
+	"log"
 	"os"
 	"slices"
 	"strings"
@@ -17,12 +18,17 @@ import (
 )
 
 type BluepalaData struct {
+	Agent      		*bluetooth.BluepalaAgent
+	UpdateChan 		chan tea.Msg
 	DBusSignals 	chan *godbus.Signal
 	Conn        	*godbus.Conn
 	Err         	error
 	Width, Height int
 	SelectedTable int
 	IsScanning    bool
+
+	ConfirmationModal models.Confirmation
+	IsModalActive 		bool
 
 	Adapters 				[]common.Adapter
 	PairedDevices  	[]common.Device
@@ -43,7 +49,15 @@ func bluepalaModel() *BluepalaData {
 	sigChan := make(chan *godbus.Signal, 10)
 	conn.Signal(sigChan)
 
+	appAgent := bluetooth.NewAgent()
+	updateChan := make(chan tea.Msg)
+	
+	// Give the agent the channel so it can send messages
+	appAgent.SetUpdateChan(updateChan)
+	
 	return &BluepalaData{
+		Agent: appAgent,
+		UpdateChan: updateChan,
 		Conn:        	conn,
 		Err:         	err,
 		DBusSignals: 	sigChan,
@@ -51,6 +65,9 @@ func bluepalaModel() *BluepalaData {
 		PairedDevices:   make([]common.Device, 0),
     UnpairedDevices: make([]common.Device, 0),
 		IsScanning: false,
+
+		ConfirmationModal: models.ModelConfirmation(),
+		IsModalActive: false,
 		
 		AdapterTable:	&models.TableData{Conn: conn, Title: "Adapter", IsTableSelected: true},
 		DevicesTable:	&models.TableData{
@@ -73,16 +90,41 @@ func bluepalaModel() *BluepalaData {
 	}
 }
 
+func (m BluepalaData) Sub() tea.Cmd {
+	return func() tea.Msg {
+		return <-m.UpdateChan
+	}
+}
+
 func (m *BluepalaData) Init() tea.Cmd {
 	return tea.Batch(
+		dbus.RegisterAgentCmd(m.Conn, m.Agent), // Register the agent on startup
 		dbus.GetInitialStateCmd(m.Conn),
 		dbus.RefreshTicker(),
 		dbus.WaitForDBusSignal(m.Conn, m.DBusSignals),
+		m.Sub(), // Start listening for agent messages
 	)
 }
 
 func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+
+	if m.IsModalActive {
+		switch msg := msg.(type) {
+		case common.SubmitConfirmMsg:
+			m.Agent.SubmitConfirmation(msg.Confirmed)
+			m.IsModalActive = false
+			// The agent is now unblocked, no further command needed here.
+			return m, nil
+		default:
+			var modalCmd tea.Cmd
+			var updatedModal tea.Model
+			updatedModal, modalCmd = m.ConfirmationModal.Update(msg)
+			m.ConfirmationModal = updatedModal.(models.Confirmation)
+			// We don't re-subscribe. The subscription from Init is still active.
+			return m, modalCmd
+		}
+	}
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -97,6 +139,37 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case common.PeriodicRefreshMsg:
 		cmd := dbus.GetInitialStateCmd(m.Conn)
 		cmds = append(cmds, cmd)
+	
+	// --- AGENT MESSAGES ---
+	case common.ShowPinModalMsg:
+		// A PIN is required!
+		// 1. Set model state to show modal
+		// m.modal = common.NewPinModal(msg.DevicePath)
+		// 2. Return the command to focus the modal
+		// return m, m.modal.Focus()
+		log.Printf("TUI: ShowPinModalMsg received! Device: %s", msg.DevicePath)
+		
+	case common.ShowConfirmModalMsg:
+		m.IsModalActive = true
+		m.ConfirmationModal.Message = "Confirm pairing to " + msg.DeviceName + "?"
+		m.ConfirmationModal.Value = false
+		// No need to re-subscribe.
+		return m, nil
+
+	case common.SubmitPinMsg:
+		// The modal is sending us a PIN
+		// 1. Send the PIN to the agent (which unblocks it)
+		m.Agent.SubmitPin(msg.Pin)
+		// 2. Close the modal
+		// m.modal = nil
+		log.Printf("TUI: Sending PIN '%s' to agent", msg.Pin)
+
+	case common.SubmitConfirmMsg:
+		// This case is now handled by the IsModalActive block at the top.
+		// We can leave this here as a fallback if needed, but it shouldn't be hit.
+		m.Agent.SubmitConfirmation(msg.Confirmed)
+		m.IsModalActive = false
+		log.Printf("TUI: Sending Confirmation '%t' to agent", msg.Confirmed)
 
 	case common.AdapterPropertiesChangedMsg:
 		for i := range m.Adapters {
@@ -112,36 +185,57 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case common.DevicePropertiesChangedMsg:
 		var newlyPairedDevice *common.Device
 		var newlyUnpairedDevice *common.Device
+		var deviceToConnect *common.Device
 
+		// This helper function now has access to the 'cmds' slice
 		updateDevice := func(devices []common.Device, isPairedList bool) {
 			for i := range devices {
 				device := &devices[i]
+				// --- Find the device that changed ---
 				if device.Path == msg.Path {
-					// Check for pairing status change
+
+					// --- Check for pairing change FIRST ---
 					if paired, ok := msg.Changes["Paired"]; ok {
-						newPairedStatus := paired.Value().(bool)
-						if newPairedStatus != device.Paired {
+						if newPairedStatus, ok := paired.Value().(bool); ok && newPairedStatus != device.Paired {
+							// Pairing status changed!
 							device.Paired = newPairedStatus
+
 							if newPairedStatus && !isPairedList {
+								// Device just got PAIRED
 								newlyPairedDevice = device
 							} else if !newPairedStatus && isPairedList {
+								// Device just got UN-PAIRED
 								newlyUnpairedDevice = device
 							}
 						}
 					}
 
+					// --- Check for trust change ---
+					if trusted, ok := msg.Changes["Trusted"]; ok {
+						if newTrustedStatus, ok := trusted.Value().(bool); ok && newTrustedStatus && !device.Trusted {
+							// Device just became trusted. If it's paired and not connected, we should connect.
+							if device.Paired && !device.Connected {
+								deviceToConnect = device
+							}
+						}
+					}
+
+					// --- Apply all other property changes ---
 					if nameVariant, ok := msg.Changes["Name"]; ok {
-						device.Name = nameVariant.Value().(string)
+						if name, ok := nameVariant.Value().(string); ok {
+							device.Name = name
+						}
 					}
 					if aliasVariant, ok := msg.Changes["Alias"]; ok {
-						device.Name = aliasVariant.Value().(string)
+						// Alias (user-set name) always wins
+						if alias, ok := aliasVariant.Value().(string); ok {
+							device.Name = alias
+						}
 					}
-					
 					if icon, ok := msg.Changes["Icon"]; ok {
-						device.Icon = bluetooth.NormalizeIcon(icon.String())
-					}
-					if paired, ok := msg.Changes["Paired"]; ok {
-						device.Paired, _ = paired.Value().(bool)
+						if iconStr, ok := icon.Value().(string); ok {
+							device.Icon = bluetooth.NormalizeIcon(iconStr)
+						}
 					}
 					if trusted, ok := msg.Changes["Trusted"]; ok {
 						device.Trusted, _ = trusted.Value().(bool)
@@ -153,25 +247,42 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						device.Connectable, _ = connectable.Value().(bool)
 					}
 					if rssi, ok := msg.Changes["RSSI"]; ok {
-						device.RSSI = rssi.Value().(int16)
+						device.RSSI, _ = rssi.Value().(int16)
 					}
 					if battery, ok := msg.Changes["Percentage"]; ok {
-						device.Battery = int8(battery.Value().(byte))
+						if val, ok := battery.Value().(byte); ok {
+							device.Battery = int8(val)
+						}
 					}
+
+					// We found and updated the device, no need to keep looping
+					return
 				}
 			}
 		}
+
+		// Run the update logic on both lists
 		updateDevice(m.PairedDevices, true)
 		updateDevice(m.UnpairedDevices, false)
 
-		// Move device if pairing status changed
+		// --- Move device if pairing status changed ---
 		if newlyPairedDevice != nil {
 			m.UnpairedDevices = removeDeviceByPath(m.UnpairedDevices, newlyPairedDevice.Path)
 			m.PairedDevices = append(m.PairedDevices, *newlyPairedDevice)
+
+			// The device was just paired, so we MUST trust it.
+			// The connection command will be sent later, after we get the "Trusted" signal.
+			cmds = append(cmds, dbus.TrustDeviceCmd(m.Conn, newlyPairedDevice.Path))
 		}
+
 		if newlyUnpairedDevice != nil {
 			m.PairedDevices = removeDeviceByPath(m.PairedDevices, newlyUnpairedDevice.Path)
 			m.UnpairedDevices = append(m.UnpairedDevices, *newlyUnpairedDevice)
+		}
+
+		// --- Connect if a device just became trusted ---
+		if deviceToConnect != nil {
+			cmds = append(cmds, dbus.ConnectToDeviceCmd(m.Conn, nil, deviceToConnect, true))
 		}
 
 		cmds = append(cmds, dbus.WaitForDBusSignal(m.Conn, m.DBusSignals))
@@ -371,7 +482,6 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Sort unpaired devices by RSSI to prevent flickering
-	sortDevicesByRSSI(m.PairedDevices)
 	sortDevicesByRSSI(m.UnpairedDevices)
 
 	// Always ensure tables have the latest data before rendering
@@ -384,7 +494,7 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *BluepalaData) View() string {
 	if m.Err != nil {
-		return fmt.Sprintf("An error occurred: %v\n\nPress 'ctrl+q' to quit.", m.Err)
+		return lipgloss.NewStyle().Width(common.WindowDimensions().Width).Render("Program exited with error:" + m.Err.Error() + "\n\nPress 'ctrl+q' to quit.")
 	}
 
 	var rightPane string
@@ -398,22 +508,25 @@ func (m *BluepalaData) View() string {
 
 	m.DevicesTable.Width = devicesWidth
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		m.AdapterTable.View(),
-		strings.TrimSpace(common.HJoin(
-			m.DevicesTable.View(),
-			rightPane,
-			m.DevicesTable.Width,
-			m.DetailsTable.Width,
-		)),
-		m.ScannedTable.View(),
-	)
+	if (m.IsModalActive) {
+		return m.ConfirmationModal.View() 
+	} else {
+		return lipgloss.JoinVertical(lipgloss.Left,
+			m.AdapterTable.View(),
+			strings.TrimSpace(common.HJoin(
+				m.DevicesTable.View(),
+				rightPane,
+				m.DevicesTable.Width,
+				m.DetailsTable.Width,
+			)),
+			m.ScannedTable.View(),
+		)
+	}
 }
 
 func main() {
-	p := tea.NewProgram(bluepalaModel(), tea.WithAltScreen(), tea.WithoutCatchPanics())
+	p := tea.NewProgram(bluepalaModel(), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
-		fmt.Println("Program exited with error:", err)
 		os.Exit(1)
 	}
 }
@@ -445,8 +558,15 @@ func removeDeviceByPath(devices []common.Device, path godbus.ObjectPath) []commo
 
 // sortDevicesByRSSI sorts a slice of devices by RSSI in descending order.
 func sortDevicesByRSSI(devices []common.Device) {
-	slices.SortFunc(devices, func(d1, d2 common.Device) int {
-		// Higher RSSI (less negative) is better.
-		return int(d1.RSSI - d2.RSSI)
+	slices.SortFunc(devices, func(a, b common.Device) int {
+		// Primary sort: RSSI descending (higher is better)
+		if a.RSSI > b.RSSI {
+			return -1
+		}
+		if a.RSSI < b.RSSI {
+			return 1
+		}
+		// Secondary sort: Name ascending (case-insensitive)
+		return strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
 	})
 }
