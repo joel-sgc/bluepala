@@ -122,7 +122,7 @@ func (m TableData) View() string {
 		Border(common.BoxBorder).
 		BorderColumn(false).
 		BorderStyle(borderStyle).
-		StyleFunc(common.BoxStyle(SelectedRow, m.IsTableSelected, &align)).
+		StyleFunc(common.BoxStyle(SelectedRow, m.IsTableSelected, &align, m.Height)).
 		Rows(tableData...)
 
 	return (common.CalcTitle(m.Title, m.IsTableSelected, m.Width) + table.Render())

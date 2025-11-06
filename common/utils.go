@@ -118,7 +118,7 @@ var BoxBorder = lipgloss.Border{
 var ActiveBorderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#9cca69"))
 var InactiveBorderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#a7abca"))
 
-func BoxStyle(selectedRow int, selectedBox bool, align *lipgloss.Position) func(row, col int) lipgloss.Style {
+func BoxStyle(selectedRow int, selectedBox bool, align *lipgloss.Position, height int) func(row, col int) lipgloss.Style {
 	padding := 1
 	if (align == nil) {
 		center := lipgloss.Center
@@ -139,7 +139,7 @@ func BoxStyle(selectedRow int, selectedBox bool, align *lipgloss.Position) func(
 					return lipgloss.Color("#a7abca")
 				}()).
 				Align(*align).Padding(0, padding)
-		case row == min(selectedRow+2, 11) && selectedBox:
+		case row == min(selectedRow+2, height) && selectedBox:
 			return lipgloss.NewStyle().
 				Background(lipgloss.Color("#a7abca")).
 				Foreground(lipgloss.Color("#444a66")).
