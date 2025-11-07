@@ -3,9 +3,11 @@ package common
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/godbus/dbus/v5"
 	"golang.org/x/term"
 )
 
@@ -175,4 +177,44 @@ func HJoin(left, right string, leftW, rightW int) string {
 		b.WriteString(fmt.Sprintf("%-*s%s\n", leftW, l, r))
 	}
 	return b.String()
+}
+
+// Returns two slices: paired devices and unpaired devices
+func FilterDevicesByPaired(devices []Device) ([]Device, []Device) {
+	pairedDevices := make([]Device, 0)
+	unpairedDevices := make([]Device, 0)
+
+	for _, device := range devices {
+		if device.Paired {
+			pairedDevices = append(pairedDevices, device)
+		} else {
+			unpairedDevices = append(unpairedDevices, device)
+		}
+	}
+
+	return pairedDevices, unpairedDevices
+}
+
+func RemoveDeviceByPath(devices []Device, path dbus.ObjectPath) []Device {
+	for i, device := range devices {
+		if device.Path == path {
+			return append(devices[:i], devices[i+1:]...)
+		}
+	}
+	return devices
+}
+
+// SortDevicesByRSSI sorts a slice of devices by RSSI in descending order.
+func SortDevicesByRSSI(devices []Device) {
+	slices.SortFunc(devices, func(a, b Device) int {
+		// Primary sort: RSSI descending (higher is better)
+		if a.RSSI > b.RSSI {
+			return -1
+		}
+		if a.RSSI < b.RSSI {
+			return 1
+		}
+		// Secondary sort: Name ascending (case-insensitive)
+		return strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
+	})
 }

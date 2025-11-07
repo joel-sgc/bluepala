@@ -9,29 +9,28 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"slices"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	godbus "github.com/godbus/dbus/v5"
+	overlay "github.com/rmhubbert/bubbletea-overlay"
 )
 
 type BluepalaData struct {
-	Agent      		*bluetooth.BluepalaAgent
-	UpdateChan 		chan tea.Msg
-	DBusSignals 	chan *godbus.Signal
-	Conn        	*godbus.Conn
-	Err         	error
+	Agent         *bluetooth.BluepalaAgent
+	UpdateChan    chan tea.Msg
+	DBusSignals   chan *godbus.Signal
+	Conn          *godbus.Conn
+	Err           error
 	Width, Height int
 	SelectedTable int
 	IsScanning    bool
 
 	ConfirmationModal models.Confirmation
-	IsModalActive 		bool
+	IsModalActive     bool
 
-	Adapters 				[]common.Adapter
-	PairedDevices  	[]common.Device
+	Adapters        []common.Adapter
+	PairedDevices   []common.Device
 	UnpairedDevices []common.Device
 
 	AdapterTable *models.TableData
@@ -51,40 +50,40 @@ func bluepalaModel() *BluepalaData {
 
 	appAgent := bluetooth.NewAgent()
 	updateChan := make(chan tea.Msg)
-	
+
 	// Give the agent the channel so it can send messages
 	appAgent.SetUpdateChan(updateChan)
-	
+
 	return &BluepalaData{
-		Agent: appAgent,
-		UpdateChan: updateChan,
-		Conn:        	conn,
-		Err:         	err,
-		DBusSignals: 	sigChan,
-		SelectedTable: 0,
+		Agent:           appAgent,
+		UpdateChan:      updateChan,
+		Conn:            conn,
+		Err:             err,
+		DBusSignals:     sigChan,
+		SelectedTable:   0,
 		PairedDevices:   make([]common.Device, 0),
-    UnpairedDevices: make([]common.Device, 0),
-		IsScanning: false,
+		UnpairedDevices: make([]common.Device, 0),
+		IsScanning:      false,
 
 		ConfirmationModal: models.ModelConfirmation(),
-		IsModalActive: false,
-		
-		AdapterTable:	&models.TableData{Conn: conn, Title: "Adapter", IsTableSelected: true},
-		DevicesTable:	&models.TableData{
-			Conn: conn, 
-			Title: "Devices",
-			Height: 11,
-			PairedDevices:   make([]common.Device, 0),
+		IsModalActive:     false,
+
+		AdapterTable: &models.TableData{Conn: conn, Title: "Adapter", IsTableSelected: true},
+		DevicesTable: &models.TableData{
+			Conn:          conn,
+			Title:         "Devices",
+			Height:        11,
+			PairedDevices: make([]common.Device, 0),
 		},
-		DetailsTable:	&models.TableData{
-			Title: "Details", 
+		DetailsTable: &models.TableData{
+			Title:  "Details",
 			Height: 12,
-			Width: 30,
+			Width:  30,
 		},
-		ScannedTable:	&models.TableData{
-			Conn: conn, 
-			Title: "Nearby Devices",
-			Height: 14,
+		ScannedTable: &models.TableData{
+			Conn:           conn,
+			Title:          "Nearby Devices",
+			Height:         15,
 			ScannedDevices: make([]common.Device, 0),
 		},
 	}
@@ -111,6 +110,15 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.IsModalActive {
 		switch msg := msg.(type) {
+		case tea.WindowSizeMsg:
+			m.Width = msg.Width
+			m.Height = msg.Height
+
+			m.AdapterTable.Width = msg.Width
+			m.DevicesTable.Width = msg.Width - 36
+			m.DetailsTable.Width = 36
+			m.ScannedTable.Width = msg.Width
+
 		case common.SubmitConfirmMsg:
 			m.Agent.SubmitConfirmation(msg.Confirmed)
 			m.IsModalActive = false
@@ -130,7 +138,7 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 		m.Height = msg.Height
-		
+
 		m.AdapterTable.Width = msg.Width
 		m.DevicesTable.Width = msg.Width - 36
 		m.DetailsTable.Width = 36
@@ -139,7 +147,7 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case common.PeriodicRefreshMsg:
 		cmd := dbus.GetInitialStateCmd(m.Conn)
 		cmds = append(cmds, cmd)
-	
+
 	// --- AGENT MESSAGES ---
 	case common.ShowPinModalMsg:
 		// A PIN is required!
@@ -148,7 +156,7 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 2. Return the command to focus the modal
 		// return m, m.modal.Focus()
 		log.Printf("TUI: ShowPinModalMsg received! Device: %s", msg.DevicePath)
-		
+
 	case common.ShowConfirmModalMsg:
 		m.IsModalActive = true
 		m.ConfirmationModal.Message = "Confirm pairing to " + msg.DeviceName + "?"
@@ -267,7 +275,7 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// --- Move device if pairing status changed ---
 		if newlyPairedDevice != nil {
-			m.UnpairedDevices = removeDeviceByPath(m.UnpairedDevices, newlyPairedDevice.Path)
+			m.UnpairedDevices = common.RemoveDeviceByPath(m.UnpairedDevices, newlyPairedDevice.Path)
 			m.PairedDevices = append(m.PairedDevices, *newlyPairedDevice)
 
 			// The device was just paired, so we MUST trust it.
@@ -276,7 +284,7 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if newlyUnpairedDevice != nil {
-			m.PairedDevices = removeDeviceByPath(m.PairedDevices, newlyUnpairedDevice.Path)
+			m.PairedDevices = common.RemoveDeviceByPath(m.PairedDevices, newlyUnpairedDevice.Path)
 			m.UnpairedDevices = append(m.UnpairedDevices, *newlyUnpairedDevice)
 		}
 
@@ -357,7 +365,7 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case common.DeviceUpdateMsg:
 		// This message comes on startup with the full list of devices.
 		// We just need to filter and split them.
-		paired, unpaired := filterDevicesByPaired(msg)
+		paired, unpaired := common.FilterDevicesByPaired(msg)
 		m.PairedDevices = paired
 		m.UnpairedDevices = unpaired
 
@@ -407,10 +415,10 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Toggle adapter power
 				adapter := &m.Adapters[m.AdapterTable.SelectedRow]
 				adapter.Powered = !adapter.Powered
-				dbus.ToggleAdapterPowerCmd(m.Conn, string(adapter.Path), !adapter.Powered)				
+				dbus.ToggleAdapterPowerCmd(m.Conn, string(adapter.Path), !adapter.Powered)
 			case 1:
 				device := &m.PairedDevices[m.DevicesTable.SelectedRow]
-				if (device.Path == "-1" || len(m.PairedDevices) <= 0) {
+				if device.Path == "-1" || len(m.PairedDevices) <= 0 {
 					// Do nothing for the blank device
 					return m, nil
 				}
@@ -433,7 +441,7 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-		case "ctrl+c", "ctrl+q":
+		case "ctrl+c", "ctrl+q", "q", "ctrl+w":
 			m.Conn.RemoveSignal(m.DBusSignals)
 			m.Conn.Close()
 			return m, tea.Quit
@@ -482,7 +490,7 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Sort unpaired devices by RSSI to prevent flickering
-	sortDevicesByRSSI(m.UnpairedDevices)
+	common.SortDevicesByRSSI(m.UnpairedDevices)
 
 	// Always ensure tables have the latest data before rendering
 	m.AdapterTable.Adapters = m.Adapters
@@ -494,34 +502,20 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *BluepalaData) View() string {
 	if m.Err != nil {
-		return lipgloss.NewStyle().Width(common.WindowDimensions().Width).Render("Program exited with error:" + m.Err.Error() + "\n\nPress 'ctrl+q' to quit.")
-	}
-
-	var rightPane string
-	devicesWidth := m.Width // Default to full width
-
-	// If a device is selected, show the details pane and shrink the devices table.
-	if m.DetailsTable.SelectedPaired != nil {
-		rightPane = m.DetailsTable.View()
-		devicesWidth = m.Width - 36
-	}
-
-	m.DevicesTable.Width = devicesWidth
-
-	if (m.IsModalActive) {
-		return m.ConfirmationModal.View() 
-	} else {
-		return lipgloss.JoinVertical(lipgloss.Left,
-			m.AdapterTable.View(),
-			strings.TrimSpace(common.HJoin(
-				m.DevicesTable.View(),
-				rightPane,
-				m.DevicesTable.Width,
-				m.DetailsTable.Width,
-			)),
-			m.ScannedTable.View(),
+		return lipgloss.NewStyle().Width(common.WindowDimensions().Width).Render(
+			"Program exited with error:" + m.Err.Error() + "\n\nPress 'ctrl+q' to quit.",
 		)
 	}
+
+	if m.IsModalActive {
+		bgModel := backgroundModel{m} // wrap main model
+		fgModel := &m.ConfirmationModal
+
+		overlayModel := overlay.New(fgModel, bgModel, overlay.Left, overlay.Top, 0, 0)
+		return overlayModel.View()
+	}
+
+	return m.MainView()
 }
 
 func main() {
@@ -529,44 +523,4 @@ func main() {
 	if _, err := p.Run(); err != nil {
 		os.Exit(1)
 	}
-}
-
-// Returns two slices: paired devices and unpaired devices
-func filterDevicesByPaired(devices []common.Device) ([]common.Device, []common.Device) {
-	pairedDevices := make([]common.Device, 0)
-	unpairedDevices := make([]common.Device, 0)
-
-	for _, device := range devices {
-		if device.Paired {
-			pairedDevices = append(pairedDevices, device)
-		} else {
-			unpairedDevices = append(unpairedDevices, device)
-		}
-	}
-
-	return pairedDevices, unpairedDevices
-}
-
-func removeDeviceByPath(devices []common.Device, path godbus.ObjectPath) []common.Device {
-	for i, device := range devices {
-		if device.Path == path {
-			return append(devices[:i], devices[i+1:]...)
-		}
-	}
-	return devices
-}
-
-// sortDevicesByRSSI sorts a slice of devices by RSSI in descending order.
-func sortDevicesByRSSI(devices []common.Device) {
-	slices.SortFunc(devices, func(a, b common.Device) int {
-		// Primary sort: RSSI descending (higher is better)
-		if a.RSSI > b.RSSI {
-			return -1
-		}
-		if a.RSSI < b.RSSI {
-			return 1
-		}
-		// Secondary sort: Name ascending (case-insensitive)
-		return strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
-	})
 }
