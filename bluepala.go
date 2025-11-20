@@ -37,6 +37,8 @@ type BluepalaData struct {
 	DevicesTable *models.TableData
 	DetailsTable *models.TableData
 	ScannedTable *models.TableData
+
+	StatusBar *models.StatusBarData
 }
 
 func bluepalaModel() *BluepalaData {
@@ -60,7 +62,7 @@ func bluepalaModel() *BluepalaData {
 		Conn:            conn,
 		Err:             err,
 		DBusSignals:     sigChan,
-		SelectedTable:   0,
+		SelectedTable:   1,
 		PairedDevices:   make([]common.Device, 0),
 		UnpairedDevices: make([]common.Device, 0),
 		IsScanning:      false,
@@ -68,24 +70,33 @@ func bluepalaModel() *BluepalaData {
 		ConfirmationModal: models.ModelConfirmation(),
 		IsModalActive:     false,
 
-		AdapterTable: &models.TableData{Conn: conn, Title: "Adapter", IsTableSelected: true},
 		DevicesTable: &models.TableData{
-			Conn:          conn,
-			Title:         "Devices",
-			Height:        11,
-			PairedDevices: make([]common.Device, 0),
+			Conn:            conn,
+			IsTableSelected: true,
+			Title:           "Devices",
+			Height:          11,
+			PairedDevices:   make([]common.Device, 0),
 		},
 		DetailsTable: &models.TableData{
-			Title:  "Details",
-			Height: 12,
-			Width:  30,
+			Title:           "Details",
+			IsTableSelected: true,
+			Height:          12,
+			Width:           30,
 		},
 		ScannedTable: &models.TableData{
 			Conn:           conn,
 			Title:          "Nearby Devices",
-			Height:         15,
+			Height:         16,
 			ScannedDevices: make([]common.Device, 0),
 		},
+		AdapterTable: &models.TableData{
+			Conn:            conn,
+			Title:           "Adapter",
+			IsTableSelected: false,
+			Height:          5,
+		},
+
+		StatusBar: &models.StatusBarData{},
 	}
 }
 
@@ -395,9 +406,7 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Give the active table the key press.
 		var cmd tea.Cmd
 		switch m.SelectedTable {
-		case 0: // Adapters
-			_, cmd = m.AdapterTable.Update(msg)
-		case 1: // Paired Devices
+		case 0, 1: // Paired Devices
 			_, cmd = m.DevicesTable.Update(msg)
 			// Also forward horizontal movement to details table
 			if msg.String() == "left" || msg.String() == "h" || msg.String() == "right" || msg.String() == "l" {
@@ -405,18 +414,15 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case 2: // Scanned Devices
 			_, cmd = m.ScannedTable.Update(msg)
+		case 3: // Adapters
+			_, cmd = m.AdapterTable.Update(msg)
 		}
 		cmds = append(cmds, cmd)
 
 		switch msg.String() {
 		case "enter", " ":
 			switch m.SelectedTable {
-			case 0:
-				// Toggle adapter power
-				adapter := &m.Adapters[m.AdapterTable.SelectedRow]
-				adapter.Powered = !adapter.Powered
-				dbus.ToggleAdapterPowerCmd(m.Conn, string(adapter.Path), !adapter.Powered)
-			case 1:
+			case 0, 1:
 				device := &m.PairedDevices[m.DevicesTable.SelectedRow]
 				if device.Path == "-1" || len(m.PairedDevices) <= 0 {
 					// Do nothing for the blank device
@@ -439,6 +445,11 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmd := dbus.PairDeviceCmd(m.Conn, device.Path)
 					cmds = append(cmds, cmd)
 				}
+			case 3:
+				// Toggle adapter power
+				adapter := &m.Adapters[m.AdapterTable.SelectedRow]
+				adapter.Powered = !adapter.Powered
+				dbus.ToggleAdapterPowerCmd(m.Conn, string(adapter.Path), !adapter.Powered)
 			}
 
 		case "ctrl+c", "ctrl+q", "q", "ctrl+w":

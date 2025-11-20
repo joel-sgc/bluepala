@@ -36,7 +36,6 @@ func (m *BluepalaData) MainView() string {
 	m.DevicesTable.Width = devicesWidth
 
 	return lipgloss.JoinVertical(lipgloss.Left,
-		m.AdapterTable.View(),
 		strings.TrimSpace(common.HJoin(
 			m.DevicesTable.View(),
 			rightPane,
@@ -44,5 +43,7 @@ func (m *BluepalaData) MainView() string {
 			m.DetailsTable.Width,
 		)),
 		m.ScannedTable.View(),
+		m.AdapterTable.View(),
+		m.StatusBar.View(),
 	)
 }

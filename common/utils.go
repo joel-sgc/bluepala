@@ -12,17 +12,17 @@ import (
 )
 
 var BlankDevice = Device{
-	Path: "-1",
-	Name: "-",
-	Address: "00:00:00:00:00:00",
-	Icon: "",
+	Path:        "-1",
+	Name:        "-",
+	Address:     "00:00:00:00:00:00",
+	Icon:        "",
 	AddressType: "-",
-	Paired: true,
-	Trusted: false,
-	Connected: false,
-	Battery: -1,
+	Paired:      true,
+	Trusted:     false,
+	Connected:   false,
+	Battery:     -1,
 	Connectable: false,
-	RSSI: -1,
+	RSSI:        -1,
 }
 
 func WindowDimensions() struct{ Width, Height int } {
@@ -59,13 +59,13 @@ func padHeaders(headers []string, headerLengths []int, totalWidth int, align *li
 		}
 	}
 
-	remaining := max(availableWidth - fixedWidth, 0)
+	remaining := max(availableWidth-fixedWidth, 0)
 
 	// Calculate base width and remainder for flexible columns
 	flexCount := len(flexColumns)
 	baseWidth := 0
 	remainder := 0
-	
+
 	if flexCount > 0 {
 		baseWidth = remaining / flexCount
 		remainder = remaining % flexCount
@@ -85,7 +85,7 @@ func padHeaders(headers []string, headerLengths []int, totalWidth int, align *li
 		headerLengths[flexIndex] = flexWidths[i]
 	}
 
-	if (align == nil) {
+	if align == nil {
 		pos := lipgloss.Center
 		align = &pos
 	}
@@ -104,31 +104,31 @@ func padHeaders(headers []string, headerLengths []int, totalWidth int, align *li
 }
 
 var BoxBorder = lipgloss.Border{
-	Top: "",
-	TopLeft: "",
+	Top:      "",
+	TopLeft:  "",
 	TopRight: "",
-	
-	MiddleLeft: "",
-	MiddleRight: "",
-	Middle: "",
-	MiddleTop: "",
+
+	MiddleLeft:   "",
+	MiddleRight:  "",
+	Middle:       "",
+	MiddleTop:    "",
 	MiddleBottom: "─",
 
 	Left: "│", Right: "│",
-  BottomLeft: "└", Bottom: "─", BottomRight: "┘",
+	BottomLeft: "└", Bottom: "─", BottomRight: "┘",
 }
 var ActiveBorderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#9cca69"))
 var InactiveBorderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#a7abca"))
 
 func BoxStyle(selectedRow int, selectedBox bool, align *lipgloss.Position, height int) func(row, col int) lipgloss.Style {
 	padding := 1
-	if (align == nil) {
+	if align == nil {
 		center := lipgloss.Center
 		align = &center
 
 		padding = 0
 	}
-	
+
 	return func(row int, col int) lipgloss.Style {
 		switch {
 		case row == 0:
