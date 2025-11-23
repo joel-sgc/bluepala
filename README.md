@@ -67,7 +67,12 @@ You'll need:
 
 ```bash
 #!/bin/bash
-exec setsid uwsm-app -- xdg-terminal-exec --app-id=com.omarchy.Impala -e bluepala \"$@\"
+$TERMINAL --title=com.omarchy.bluepala bluepala
+```
+
+## Hyprland floating window rules
+```bash
+windowrule = tag +floating-window, title:(com.omarchy.bluepala)
 ```
 
 ---
