@@ -72,7 +72,7 @@ $TERMINAL --title=com.omarchy.bluepala bluepala
 
 ## Hyprland floating window rules
 ```bash
-windowrule = tag +floating-window, title:(com.omarchy.bluepala)
+windowrule = float 1, match:title com.omarchy.bluepala
 ```
 
 ---
