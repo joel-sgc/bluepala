@@ -117,10 +117,15 @@ var BoxBorder = lipgloss.Border{
 	Left: "│", Right: "│",
 	BottomLeft: "└", Bottom: "─", BottomRight: "┘",
 }
-var ActiveBorderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#9cca69"))
-var InactiveBorderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#a7abca"))
+func ActiveBorderStyle(color string) lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+}
 
-func BoxStyle(selectedRow int, selectedBox bool, align *lipgloss.Position, height int) func(row, col int) lipgloss.Style {
+func InactiveBorderStyle(color string) lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+}
+
+func BoxStyle(selectedRow int, selectedBox bool, align *lipgloss.Position, height int, primaryColor, activeTextColor, inactiveColor, selectionBg string) func(row, col int) lipgloss.Style {
 	padding := 1
 	if align == nil {
 		center := lipgloss.Center
@@ -136,18 +141,18 @@ func BoxStyle(selectedRow int, selectedBox bool, align *lipgloss.Position, heigh
 				Bold(true).
 				Foreground(func() lipgloss.Color {
 					if selectedBox {
-						return lipgloss.Color("#cda162")
+						return lipgloss.Color(activeTextColor)
 					}
-					return lipgloss.Color("#a7abca")
+					return lipgloss.Color(primaryColor)
 				}()).
 				Align(*align).Padding(0, padding)
 		case row == min(selectedRow+2, height) && selectedBox:
 			return lipgloss.NewStyle().
-				Background(lipgloss.Color("#a7abca")).
-				Foreground(lipgloss.Color("#444a66")).
+				Background(lipgloss.Color(selectionBg)).
+				Foreground(lipgloss.Color(inactiveColor)).
 				Align(*align).Padding(0, padding)
 		default:
-			return lipgloss.NewStyle().Foreground(lipgloss.Color("#a7abca")).Align(*align).Padding(0, padding)
+			return lipgloss.NewStyle().Foreground(lipgloss.Color(primaryColor)).Align(*align).Padding(0, padding)
 		}
 	}
 }

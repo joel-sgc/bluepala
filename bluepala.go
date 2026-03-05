@@ -4,16 +4,18 @@ package main
 import (
 	"bluepala/bluetooth"
 	"bluepala/common"
+	"bluepala/config"
 	"bluepala/dbus"
 	"bluepala/models"
 	"fmt"
 	"log"
 	"os"
 
+	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	godbus "github.com/godbus/dbus/v5"
 	overlay "github.com/rmhubbert/bubbletea-overlay"
+	"go.dalton.dog/bubbleup"
 )
 
 type BluepalaData struct {
@@ -25,6 +27,9 @@ type BluepalaData struct {
 	Width, Height int
 	SelectedTable int
 	IsScanning    bool
+	Colors        config.Colors
+	KeyMap        config.AppKeyMap
+	Alert         bubbleup.AlertModel
 
 	ConfirmationModal models.Confirmation
 	IsModalActive     bool
@@ -44,7 +49,11 @@ type BluepalaData struct {
 func bluepalaModel() *BluepalaData {
 	conn, err := godbus.SystemBus()
 	if err != nil {
-		return &BluepalaData{Err: fmt.Errorf("failed to connect to D-Bus: %w", err)}
+		cfg, _ := config.Load()
+		return &BluepalaData{
+			Err:    fmt.Errorf("failed to connect to D-Bus: %w", err),
+			Colors: cfg.Colors,
+		}
 	}
 
 	sigChan := make(chan *godbus.Signal, 10)
@@ -52,9 +61,13 @@ func bluepalaModel() *BluepalaData {
 
 	appAgent := bluetooth.NewAgent()
 	updateChan := make(chan tea.Msg)
-
-	// Give the agent the channel so it can send messages
 	appAgent.SetUpdateChan(updateChan)
+
+	cfg, _ := config.Load()
+	colors := cfg.Colors
+	keyMap := config.NewAppKeyMap(cfg)
+
+	alert := bubbleup.NewAlertModel(40, true, 10)
 
 	return &BluepalaData{
 		Agent:           appAgent,
@@ -66,8 +79,11 @@ func bluepalaModel() *BluepalaData {
 		PairedDevices:   make([]common.Device, 0),
 		UnpairedDevices: make([]common.Device, 0),
 		IsScanning:      false,
+		Colors:          colors,
+		KeyMap:          keyMap,
+		Alert:           *alert,
 
-		ConfirmationModal: models.ModelConfirmation(),
+		ConfirmationModal: models.ModelConfirmation(colors),
 		IsModalActive:     false,
 
 		DevicesTable: &models.TableData{
@@ -76,27 +92,34 @@ func bluepalaModel() *BluepalaData {
 			Title:           "Devices",
 			Height:          11,
 			PairedDevices:   make([]common.Device, 0),
+			Colors:          colors,
 		},
 		DetailsTable: &models.TableData{
 			Title:           "Details",
 			IsTableSelected: true,
 			Height:          12,
 			Width:           30,
+			Colors:          colors,
 		},
 		ScannedTable: &models.TableData{
 			Conn:           conn,
 			Title:          "Nearby Devices",
 			Height:         16,
 			ScannedDevices: make([]common.Device, 0),
+			Colors:         colors,
 		},
 		AdapterTable: &models.TableData{
 			Conn:            conn,
 			Title:           "Adapter",
 			IsTableSelected: false,
 			Height:          5,
+			Colors:          colors,
 		},
 
-		StatusBar: &models.StatusBarData{},
+		StatusBar: &models.StatusBarData{
+			KeyMap: keyMap,
+			Colors: colors,
+		},
 	}
 }
 
@@ -107,7 +130,11 @@ func (m BluepalaData) Sub() tea.Cmd {
 }
 
 func (m *BluepalaData) Init() tea.Cmd {
+	if m.Err != nil {
+		return nil
+	}
 	return tea.Batch(
+		m.Alert.Init(),
 		dbus.RegisterAgentCmd(m.Conn, m.Agent), // Register the agent on startup
 		dbus.GetInitialStateCmd(m.Conn),
 		dbus.RefreshTicker(),
@@ -400,13 +427,16 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, dbus.WaitForDBusSignal(m.Conn, m.DBusSignals))
 
 	case common.ErrMsg:
-		m.Err = msg.Err
+		alertCmd := m.Alert.NewAlertCmd(bubbleup.ErrorKey, "Error: "+msg.Err.Error())
+		return m, alertCmd
 
 	case tea.KeyMsg:
 		// Give the active table the key press.
 		var cmd tea.Cmd
 		switch m.SelectedTable {
-		case 0, 1: // Paired Devices
+		case 0: // Adapters
+			_, cmd = m.AdapterTable.Update(msg)
+		case 1: // Paired Devices
 			_, cmd = m.DevicesTable.Update(msg)
 			// Also forward horizontal movement to details table
 			if msg.String() == "left" || msg.String() == "h" || msg.String() == "right" || msg.String() == "l" {
@@ -414,15 +444,13 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case 2: // Scanned Devices
 			_, cmd = m.ScannedTable.Update(msg)
-		case 3: // Adapters
-			_, cmd = m.AdapterTable.Update(msg)
 		}
 		cmds = append(cmds, cmd)
 
-		switch msg.String() {
-		case "enter", " ":
+		switch {
+		case key.Matches(msg, m.KeyMap.Select):
 			switch m.SelectedTable {
-			case 0, 1:
+			case 1:
 				device := &m.PairedDevices[m.DevicesTable.SelectedRow]
 				if device.Path == "-1" || len(m.PairedDevices) <= 0 {
 					// Do nothing for the blank device
@@ -445,25 +473,26 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmd := dbus.PairDeviceCmd(m.Conn, device.Path)
 					cmds = append(cmds, cmd)
 				}
-			case 3:
+			case 0:
 				// Toggle adapter power
 				adapter := &m.Adapters[m.AdapterTable.SelectedRow]
 				adapter.Powered = !adapter.Powered
 				dbus.ToggleAdapterPowerCmd(m.Conn, string(adapter.Path), !adapter.Powered)
 			}
 
-		case "ctrl+c", "ctrl+q", "q", "ctrl+w":
+		case key.Matches(msg, m.KeyMap.Quit):
 			m.Conn.RemoveSignal(m.DBusSignals)
 			m.Conn.Close()
 			return m, tea.Quit
-		case "tab", "shift+tab":
+
+		case key.Matches(msg, m.KeyMap.NextPane), key.Matches(msg, m.KeyMap.PrevPane):
 			tables := []*models.TableData{
 				m.AdapterTable,
 				m.DevicesTable,
 				m.ScannedTable,
 			}
 
-			if msg.String() == "tab" {
+			if key.Matches(msg, m.KeyMap.NextPane) {
 				m.SelectedTable = (m.SelectedTable + 1) % len(tables)
 			} else {
 				m.SelectedTable = (m.SelectedTable - 1 + len(tables)) % len(tables)
@@ -479,12 +508,8 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.DetailsTable.IsTableSelected = i == 1
 				}
 			}
-		case "left", "h", "right", "l":
-			// This is now handled above and forwarded to the details table
-			// if the paired devices table is selected.
-		case "up", "k", "down", "j":
-			// This is now handled by the active table directly.
-		case "s":
+
+		case key.Matches(msg, m.KeyMap.Scan):
 			if len(m.Adapters) > 0 {
 				if !m.IsScanning {
 					cmds = append(cmds, dbus.StartScanning(m.Conn, &m.Adapters[0].Path))
@@ -508,25 +533,34 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.DevicesTable.PairedDevices = m.PairedDevices
 	m.ScannedTable.ScannedDevices = m.UnpairedDevices
 
+	// Pass every message through the alert model so it can tick and dismiss.
+	var updatedAlert tea.Model
+	var alertCmd tea.Cmd
+	updatedAlert, alertCmd = m.Alert.Update(msg)
+	m.Alert = updatedAlert.(bubbleup.AlertModel)
+	cmds = append(cmds, alertCmd)
+
 	return m, tea.Batch(cmds...)
 }
 
 func (m *BluepalaData) View() string {
-	if m.Err != nil {
-		return lipgloss.NewStyle().Width(common.WindowDimensions().Width).Render(
-			"Program exited with error:" + m.Err.Error() + "\n\nPress 'ctrl+q' to quit.",
-		)
+	// Fatal startup error (e.g. D-Bus unavailable) — show full-screen error.
+	if m.Conn == nil {
+		return models.ModelError(
+			"Failed to connect to D-Bus.\n\n"+m.Err.Error()+"\n\nPress Enter, Esc, or Ctrl+C to quit.",
+			m.Colors,
+		).View()
 	}
 
 	if m.IsModalActive {
-		bgModel := backgroundModel{m} // wrap main model
+		bgModel := backgroundModel{m}
 		fgModel := &m.ConfirmationModal
 
 		overlayModel := overlay.New(fgModel, bgModel, overlay.Left, overlay.Top, 0, 0)
-		return overlayModel.View()
+		return m.Alert.Render(overlayModel.View())
 	}
 
-	return m.MainView()
+	return m.Alert.Render(m.MainView())
 }
 
 func main() {

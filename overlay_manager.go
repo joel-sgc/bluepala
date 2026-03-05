@@ -25,6 +25,20 @@ func (b backgroundModel) View() string {
 }
 
 func (m *BluepalaData) MainView() string {
+	// Dynamic height calculation for ScannedTable only.
+	// DevicesTable and DetailsTable keep their fixed initialized heights.
+	// Each table block = CalcTitle (1 line) + rows (Height) + bottom border (1 line).
+	// AdapterTable rows are not height-clamped; compute from actual adapter count.
+	totalHeight := m.Height
+	if totalHeight == 0 {
+		totalHeight = common.WindowDimensions().Height
+	}
+	adapterRows := max(len(m.Adapters), 1) + 2 // header row + blank row + adapter rows
+	adapterTotal := adapterRows + 2             // + CalcTitle + bottom border
+	// Overhead: DevicesTable block + ScannedTable chrome (CalcTitle + border) + StatusBar
+	fixedOverhead := (m.DevicesTable.Height + 2) + adapterTotal + 1 + 2
+	m.ScannedTable.Height = max(totalHeight-fixedOverhead, 3)
+
 	var rightPane string
 	devicesWidth := m.Width
 

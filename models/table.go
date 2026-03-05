@@ -2,6 +2,7 @@ package models
 
 import (
 	"bluepala/common"
+	"bluepala/config"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -15,15 +16,16 @@ type TableData struct {
 	IsTableSelected bool
 	SelectedRow     int
 	Height          int
-	Width						int
+	Width           int
+	Colors          config.Colors
 
-	Adapters        []common.Adapter
-	PairedDevices   []common.Device
-	SelectedPaired  *common.Device
-	ScannedDevices	[]common.Device
+	Adapters       []common.Adapter
+	PairedDevices  []common.Device
+	SelectedPaired *common.Device
+	ScannedDevices []common.Device
 }
 
-func (m *TableData) Init() tea.Cmd {	
+func (m *TableData) Init() tea.Cmd {
 	return nil
 }
 
@@ -86,9 +88,9 @@ func (m *TableData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m TableData) View() string {
-	borderStyle := common.InactiveBorderStyle
+	borderStyle := common.InactiveBorderStyle(m.Colors.Primary)
 	if m.IsTableSelected {
-		borderStyle = common.ActiveBorderStyle
+		borderStyle = common.ActiveBorderStyle(m.Colors.Active)
 	}
 
 	var tableData [][]string
@@ -104,7 +106,7 @@ func (m TableData) View() string {
 		align = lipgloss.Left
 	} else if m.SelectedPaired != nil {
 		align = lipgloss.Left
-		tableData = common.FormatDetails(m.SelectedPaired, m.Width, m.Height, m.IsTableSelected, m.SelectedRow)
+		tableData = common.FormatDetails(m.SelectedPaired, m.Width, m.Height, m.IsTableSelected, m.SelectedRow, m.Colors.ActiveText)
 	} else if m.ScannedDevices != nil {
 		tableData = common.FormatDevices(
 			common.FormatArrays(m.ScannedDevices, m.SelectedRow, m.Height-1),
@@ -117,13 +119,13 @@ func (m TableData) View() string {
 	if m.IsTableSelected && m.SelectedPaired == nil {
 		SelectedRow = m.SelectedRow
 	}
-	
+
 	table := table.New().
 		Border(common.BoxBorder).
 		BorderColumn(false).
 		BorderStyle(borderStyle).
-		StyleFunc(common.BoxStyle(SelectedRow, m.IsTableSelected, &align, m.Height)).
+		StyleFunc(common.BoxStyle(SelectedRow, m.IsTableSelected, &align, m.Height, m.Colors.Primary, m.Colors.ActiveText, m.Colors.Inactive, m.Colors.SelectionBg)).
 		Rows(tableData...)
 
-	return (common.CalcTitle(m.Title, m.IsTableSelected, m.Width) + table.Render())
+	return (common.CalcTitle(m.Title, m.IsTableSelected, m.Width, m.Colors.Primary, m.Colors.Active) + table.Render())
 }

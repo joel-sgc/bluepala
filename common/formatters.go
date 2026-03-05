@@ -27,15 +27,15 @@ func JustifyBetween(s1, s2 string, padding int) string {
 	return s1 + strings.Repeat(" ", spaceWidth-padding) + s2
 }
 
-func CalcTitle(title string, selected bool, totalWidth int) string {
-	color := "#a7abca"
+func CalcTitle(title string, selected bool, totalWidth int, primaryColor, activeColor string) string {
+	color := primaryColor
 	bold := false
 	if selected {
-		color = "#9cca69"
+		color = activeColor
 		bold = true
 	}
 
-	if (totalWidth == 0) {
+	if totalWidth == 0 {
 		totalWidth = WindowDimensions().Width
 	}
 
@@ -103,18 +103,18 @@ func FormatDevices(devices []Device, selectedRow int, width int, height int) [][
 	return data
 }
 
-func FormatDetails(device *Device, width int, height int, selectedBox bool, selectedRow int) [][]string {
+func FormatDetails(device *Device, width int, height int, selectedBox bool, selectedRow int, activeTextColor string) [][]string {
 	data := [][]string{}
 
 	connected := "Disconnected"
-	if (device.Connected) {
+	if device.Connected {
 		connected = "Connected"
 	}
 
 	alignVal := lipgloss.Center
 	style := lipgloss.NewStyle().Bold(true)
 	if selectedBox {
-		style = style.Foreground(lipgloss.Color("#cda162"))
+		style = style.Foreground(lipgloss.Color(activeTextColor))
 	}
 
 	options := []string{"[Toggle]", "[Remove]", "[Rename]"}
@@ -122,8 +122,8 @@ func FormatDetails(device *Device, width int, height int, selectedBox bool, sele
 
 	spacingWidth := width - lipgloss.Width(strings.Join(options, "")) - 4
 	spacing := []string{
-		strings.Repeat(" ", spacingWidth - (spacingWidth / 2)),
-		strings.Repeat(" ", spacingWidth / 2),
+		strings.Repeat(" ", spacingWidth-(spacingWidth/2)),
+		strings.Repeat(" ", spacingWidth/2),
 	}
 
 	data = append(data, []string{""})
@@ -134,7 +134,7 @@ func FormatDetails(device *Device, width int, height int, selectedBox bool, sele
 	data = append(data, []string{"Battery: " + fmt.Sprintf("%d%%", device.Battery)})
 	data = append(data, []string{"RSSI: " + fmt.Sprintf("%d%%", device.RSSI)})
 	data = append(data, []string{"Type: " + device.Icon})
-	data = append(data, []string{strings.Repeat("-", width - 4)})
+	data = append(data, []string{strings.Repeat("-", width-4)})
 	data = append(data, []string{fmt.Sprintf("%s%s%s%s%s", options[0], spacing[0], options[1], spacing[1], options[2])})
 	data = append(data, []string{""})
 

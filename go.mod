@@ -10,8 +10,11 @@ require (
 )
 
 require (
+	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
+	github.com/muesli/reflow v0.3.0 // indirect
 	github.com/rmhubbert/bubbletea-overlay v0.4.4 // indirect
+	go.dalton.dog/bubbleup v1.1.0 // indirect
 	golang.org/x/exp v0.0.0-20241204233417-43b7b7cde48d // indirect
 )
 
