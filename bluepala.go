@@ -34,6 +34,10 @@ type BluepalaData struct {
 	ConfirmationModal models.Confirmation
 	IsModalActive     bool
 
+	RenameForm     models.RenameForm
+	IsRenameActive bool
+	RenameTarget   *common.Device
+
 	Adapters        []common.Adapter
 	PairedDevices   []common.Device
 	UnpairedDevices []common.Device
@@ -85,6 +89,10 @@ func bluepalaModel() *BluepalaData {
 
 		ConfirmationModal: models.ModelConfirmation(colors),
 		IsModalActive:     false,
+
+		RenameForm:     models.ModelRenameForm(colors),
+		IsRenameActive: false,
+		RenameTarget:   nil,
 
 		DevicesTable: &models.TableData{
 			Conn:            conn,
@@ -169,6 +177,26 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ConfirmationModal = updatedModal.(models.Confirmation)
 			// We don't re-subscribe. The subscription from Init is still active.
 			return m, modalCmd
+		}
+	}
+
+	if m.IsRenameActive {
+		switch msg := msg.(type) {
+		case tea.WindowSizeMsg:
+			m.Width = msg.Width
+			m.Height = msg.Height
+		case common.SubmitRenameMsg:
+			m.IsRenameActive = false
+			if msg.Name != "" && m.RenameTarget != nil {
+				return m, dbus.RenameDeviceCmd(m.Conn, m.RenameTarget.Path, msg.Name)
+			}
+			return m, nil
+		default:
+			var formCmd tea.Cmd
+			var updatedForm tea.Model
+			updatedForm, formCmd = m.RenameForm.Update(msg)
+			m.RenameForm = updatedForm.(models.RenameForm)
+			return m, formCmd
 		}
 	}
 
@@ -466,6 +494,15 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Forget device
 					cmd := dbus.ForgetDeviceCmd(m.Conn, m.Adapters[0].Path, device.Path)
 					cmds = append(cmds, cmd)
+				case 2:
+					// Rename device
+					m.RenameForm.Input.SetValue("")
+					m.RenameForm.Input.Focus()
+					m.RenameForm.Device = device
+					m.RenameForm.ConfirmValue = false
+					m.RenameTarget = device
+					m.IsRenameActive = true
+					return m, m.RenameForm.Init()
 				}
 			case 2:
 				if len(m.UnpairedDevices) > m.ScannedTable.SelectedRow {
@@ -557,6 +594,14 @@ func (m *BluepalaData) View() string {
 		fgModel := &m.ConfirmationModal
 
 		overlayModel := overlay.New(fgModel, bgModel, overlay.Left, overlay.Top, 0, 0)
+		return m.Alert.Render(overlayModel.View())
+	}
+
+	if m.IsRenameActive {
+		bgModel := backgroundModel{m}
+		fgModel := &m.RenameForm
+
+		overlayModel := overlay.New(fgModel, bgModel, overlay.Left, overlay.Center, common.CalculatePadding(fgModel.View()), 0)
 		return m.Alert.Render(overlayModel.View())
 	}
 

@@ -193,6 +193,23 @@ func TrustDeviceCmd(conn *dbus.Conn, devicePath dbus.ObjectPath) tea.Cmd {
 	}
 }
 
+func RenameDeviceCmd(conn *dbus.Conn, devicePath dbus.ObjectPath, newName string) tea.Cmd {
+	return func() tea.Msg {
+		deviceObj := conn.Object(bluetooth.BluezDest, devicePath)
+		call := deviceObj.Call(
+			bluetooth.PropsIF+".Set",
+			0,
+			bluetooth.DeviceIF,
+			"Alias",
+			dbus.MakeVariant(newName),
+		)
+		if call.Err != nil {
+			return common.ErrMsg{Err: fmt.Errorf("failed to rename device: %w", call.Err)}
+		}
+		return nil
+	}
+}
+
 func StartScanning(conn *dbus.Conn, adapterPath *dbus.ObjectPath) tea.Cmd {
 	return func() tea.Msg {
 		obj := conn.Object(bluetooth.BluezDest, *adapterPath)

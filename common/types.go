@@ -65,6 +65,11 @@ type SubmitConfirmMsg struct {
 	Confirmed bool
 }
 
+// SubmitRenameMsg is sent *from* the rename form *to* the Update loop
+type SubmitRenameMsg struct {
+	Name string // empty string means the rename was cancelled
+}
+
 // --- Data Models ---
 
 // Adapter represents a Bluetooth controller on your computer (e.t.g., hci0).
