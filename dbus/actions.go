@@ -23,11 +23,9 @@ func GetInitialStateCmd(conn *dbus.Conn) tea.Cmd {
 		}
 
 		// Send both lists back in a batch
-		// We'll update common/types.go to include these messages
 		return tea.Batch(
 			func() tea.Msg { return common.AdapterUpdateMsg(adapters) },
 			func() tea.Msg { return common.DeviceUpdateMsg(devices) },
-			func() tea.Msg { return common.PeriodicRefreshMsg{} },
 		)()
 	}
 }

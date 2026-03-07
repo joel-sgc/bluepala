@@ -68,16 +68,20 @@ func (a *BluepalaAgent) RequestConfirmation(device dbus.ObjectPath, passkey uint
 	if a.UpdateChan != nil {
 		// --- Get the device name to show in the modal ---
 		deviceName := "Unknown Device"
-		conn, err := dbus.SystemBus() // Get a temporary connection
+		conn, err := dbus.SystemBusPrivate()
 		if err == nil {
-			defer conn.Close()
-			obj := conn.Object(BluezDest, device)
-			nameVar, err := obj.GetProperty(DeviceIF + ".Name")
-			if err == nil {
-				if name, ok := nameVar.Value().(string); ok && name != "" {
-					deviceName = name
+			if err = conn.Auth(nil); err == nil {
+				if err = conn.Hello(); err == nil {
+					obj := conn.Object(BluezDest, device)
+					nameVar, nameErr := obj.GetProperty(DeviceIF + ".Name")
+					if nameErr == nil {
+						if name, ok := nameVar.Value().(string); ok && name != "" {
+							deviceName = name
+						}
+					}
 				}
 			}
+			conn.Close() // Close private connection explicitly before blocking
 		}
 		// ---
 

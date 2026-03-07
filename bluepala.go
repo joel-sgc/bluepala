@@ -34,6 +34,9 @@ type BluepalaData struct {
 	ConfirmationModal models.Confirmation
 	IsModalActive     bool
 
+	PairConfirmForm     models.PairConfirmForm
+	IsPairConfirmActive bool
+
 	RenameForm     models.RenameForm
 	IsRenameActive bool
 	RenameTarget   *common.Device
@@ -89,6 +92,9 @@ func bluepalaModel() *BluepalaData {
 
 		ConfirmationModal: models.ModelConfirmation(colors),
 		IsModalActive:     false,
+
+		PairConfirmForm:     models.ModelPairConfirmForm(colors),
+		IsPairConfirmActive: false,
 
 		RenameForm:     models.ModelRenameForm(colors),
 		IsRenameActive: false,
@@ -180,6 +186,35 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if m.IsPairConfirmActive {
+		switch msg := msg.(type) {
+		case tea.WindowSizeMsg:
+			m.Width = msg.Width
+			m.Height = msg.Height
+		case common.SubmitConfirmMsg:
+			m.Agent.SubmitConfirmation(msg.Confirmed)
+			m.IsPairConfirmActive = false
+			// Re-start signal listener and refresh device list after pairing completes.
+			return m, tea.Batch(
+				dbus.WaitForDBusSignal(m.Conn, m.DBusSignals),
+				dbus.GetInitialStateCmd(m.Conn),
+			)
+		default:
+			var formCmd tea.Cmd
+			var updatedForm tea.Model
+			updatedForm, formCmd = m.PairConfirmForm.Update(msg)
+			m.PairConfirmForm = updatedForm.(models.PairConfirmForm)
+			// Re-queue signal listener if a D-Bus signal message arrived while modal was open.
+			switch msg.(type) {
+			case common.DevicePropertiesChangedMsg, common.DeviceAddedMsg,
+				common.DeviceRemovedMsg, common.AdapterPropertiesChangedMsg,
+				common.DeviceUpdateMsg, common.AdapterUpdateMsg:
+				return m, tea.Batch(formCmd, dbus.WaitForDBusSignal(m.Conn, m.DBusSignals))
+			}
+			return m, formCmd
+		}
+	}
+
 	if m.IsRenameActive {
 		switch msg := msg.(type) {
 		case tea.WindowSizeMsg:
@@ -224,10 +259,26 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		log.Printf("TUI: ShowPinModalMsg received! Device: %s", msg.DevicePath)
 
 	case common.ShowConfirmModalMsg:
-		m.IsModalActive = true
-		m.ConfirmationModal.Message = "Confirm pairing to " + msg.DeviceName + "?"
-		m.ConfirmationModal.Value = false
-		// No need to re-subscribe.
+		// Look up the device by path so we can show its info
+		var device *common.Device
+		for i := range m.UnpairedDevices {
+			if m.UnpairedDevices[i].Path == msg.DevicePath {
+				device = &m.UnpairedDevices[i]
+				break
+			}
+		}
+		if device == nil {
+			for i := range m.PairedDevices {
+				if m.PairedDevices[i].Path == msg.DevicePath {
+					device = &m.PairedDevices[i]
+					break
+				}
+			}
+		}
+		m.PairConfirmForm.Device = device
+		m.PairConfirmForm.Passkey = msg.Passkey
+		m.PairConfirmForm.ConfirmValue = false
+		m.IsPairConfirmActive = true
 		return m, nil
 
 	case common.SubmitPinMsg:
@@ -407,6 +458,9 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Sort only when the list structurally changes, not on every RSSI update.
+		common.SortDevicesByRSSI(m.UnpairedDevices)
+
 		cmds = append(cmds, dbus.WaitForDBusSignal(m.Conn, m.DBusSignals))
 
 	case common.DeviceRemovedMsg:
@@ -426,6 +480,8 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.DetailsTable.SelectedPaired = nil
 		}
 
+		common.SortDevicesByRSSI(m.UnpairedDevices)
+
 		cmds = append(cmds, dbus.WaitForDBusSignal(m.Conn, m.DBusSignals))
 
 	case common.DeviceUpdateMsg:
@@ -434,6 +490,9 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		paired, unpaired := common.FilterDevicesByPaired(msg)
 		m.PairedDevices = paired
 		m.UnpairedDevices = unpaired
+
+		// Sort unpaired devices on full list replacement.
+		common.SortDevicesByRSSI(m.UnpairedDevices)
 
 		// Automatically select the first paired device on startup, if it exists.
 		cmd := func() tea.Msg {
@@ -562,9 +621,6 @@ func (m *BluepalaData) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ScannedTable.ScannedDevices = m.UnpairedDevices
 	}
 
-	// Sort unpaired devices by RSSI to prevent flickering
-	common.SortDevicesByRSSI(m.UnpairedDevices)
-
 	// Always ensure tables have the latest data before rendering
 	m.AdapterTable.Adapters = m.Adapters
 	m.DevicesTable.PairedDevices = m.PairedDevices
@@ -594,6 +650,14 @@ func (m *BluepalaData) View() string {
 		fgModel := &m.ConfirmationModal
 
 		overlayModel := overlay.New(fgModel, bgModel, overlay.Left, overlay.Top, 0, 0)
+		return m.Alert.Render(overlayModel.View())
+	}
+
+	if m.IsPairConfirmActive {
+		bgModel := backgroundModel{m}
+		fgModel := &m.PairConfirmForm
+
+		overlayModel := overlay.New(fgModel, bgModel, overlay.Left, overlay.Center, common.CalculatePadding(fgModel.View()), 0)
 		return m.Alert.Render(overlayModel.View())
 	}
 

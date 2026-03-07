@@ -210,16 +210,26 @@ func RemoveDeviceByPath(devices []Device, path dbus.ObjectPath) []Device {
 }
 
 // SortDevicesByRSSI sorts a slice of devices by RSSI in descending order.
+// RSSI is bucketed into 5 dBm bands to prevent flickering from minor signal fluctuations.
 func SortDevicesByRSSI(devices []Device) {
-	slices.SortFunc(devices, func(a, b Device) int {
-		// Primary sort: RSSI descending (higher is better)
-		if a.RSSI > b.RSSI {
+	bucketRSSI := func(rssi int16) int16 {
+		if rssi >= 0 {
+			return (rssi / 5) * 5
+		}
+		return -((-rssi) / 5) * 5
+	}
+	slices.SortStableFunc(devices, func(a, b Device) int {
+		ba, bb := bucketRSSI(a.RSSI), bucketRSSI(b.RSSI)
+		if ba > bb {
 			return -1
 		}
-		if a.RSSI < b.RSSI {
+		if ba < bb {
 			return 1
 		}
-		// Secondary sort: Name ascending (case-insensitive)
-		return strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
+		// Within the same band: sort by name, then address
+		if nc := strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name)); nc != 0 {
+			return nc
+		}
+		return strings.Compare(a.Address, b.Address)
 	})
 }
